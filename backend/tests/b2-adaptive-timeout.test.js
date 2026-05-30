@@ -1,0 +1,166 @@
+/**
+ * @module tests/b2-adaptive-timeout
+ * @description AUDIT-ROADMAP Bundle 2 — pure-function contracts.
+ *
+ * Locks in the deterministic shape of:
+ *   - `testRunner.p95`                       — R-7 linear-interpolation percentile
+ *   - `testRunner.computeAdaptiveElementTimeout` — `2 * p95` clamped to [floor, ceiling]
+ *   - `crawlBrowser.shouldEnumerateFrame`    — iframe-strategy gate
+ *   - `selfHealing.getSelfHealingHelperCode` — adaptive-timeout injection
+ *
+ * Browser-level iframe enumeration + SPA hydration are exercised by the
+ * end-to-end QA flow (`QA.md` § "iframe + SPA hydration (B2)"); this file
+ * keeps the unit-level contract green and is registered in
+ * `backend/tests/run-tests.js`.
+ */
+
+import assert from "node:assert/strict";
+import { p95, computeAdaptiveElementTimeout } from "../src/testRunner.js";
+import { shouldEnumerateFrame } from "../src/pipeline/crawlBrowser.js";
+import { getSelfHealingHelperCode } from "../src/selfHealing.js";
+
+let passed = 0;
+let failed = 0;
+
+function test(name, fn) {
+  try {
+    fn();
+    console.log(`  \u2713 ${name}`);
+    passed++;
+  } catch (err) {
+    console.error(`  \u2717 ${name}`);
+    console.error(`     ${err?.stack || err?.message || err}`);
+    failed++;
+  }
+}
+
+function main() {
+  console.log("\n\u2500\u2500 b2-adaptive-timeout \u2500\u2500");
+
+  // ── p95 — R-7 / NumPy default / Excel PERCENTILE.INC contract ─────────
+  test("p95: empty / non-array returns null (caller falls back to floor)", () => {
+    assert.equal(p95([]), null);
+    assert.equal(p95(undefined), null);
+    assert.equal(p95(null), null);
+    assert.equal(p95("not an array"), null);
+  });
+
+  test("p95: rejects non-finite and negative entries before interpolation", () => {
+    assert.equal(p95([NaN, Infinity, -100]), null);
+    // Filtered set is [50] → p95 of a single value is that value.
+    assert.equal(p95([NaN, 50, Infinity]), 50);
+  });
+
+  test("p95: single-value input returns that value (no division-by-zero)", () => {
+    assert.equal(p95([1200]), 1200);
+  });
+
+  test("p95: linear interpolation between adjacent ranks (R-7)", () => {
+    // For [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000] the rank is
+    // 0.95 * (10 - 1) = 8.55 — between index 8 (900) and 9 (1000),
+    // interpolated: 900 + (1000 - 900) * 0.55 = 955.
+    const values = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000];
+    assert.equal(p95(values), 955);
+  });
+
+  test("p95: sorts input before computing (insensitive to caller order)", () => {
+    const shuffled = [500, 100, 900, 300, 700, 200, 800, 400, 1000, 600];
+    assert.equal(p95(shuffled), 955);
+  });
+
+  // ── computeAdaptiveElementTimeout — `2 * p95` clamped to [floor, ceil] ─
+  test("adaptive: null p95 returns the floor (no crawl-timing data)", () => {
+    assert.equal(computeAdaptiveElementTimeout(null), 5000);
+    assert.equal(computeAdaptiveElementTimeout(undefined), 5000);
+  });
+
+  test("adaptive: fast page (p95=1000ms) clamps up to the floor", () => {
+    // 2 * 1000 = 2000ms, below floor 5000 → floor wins.
+    assert.equal(computeAdaptiveElementTimeout(1000), 5000);
+  });
+
+  test("adaptive: moderate p95 (p95=8000ms) returns 2 * p95 unclamped", () => {
+    // 2 * 8000 = 16000, inside [5000, 30000].
+    assert.equal(computeAdaptiveElementTimeout(8000), 16000);
+  });
+
+  test("adaptive: slow outlier (p95=120000ms) clamps down to the ceiling", () => {
+    // 2 * 120000 = 240000, above ceiling 30000 → ceiling wins.
+    assert.equal(computeAdaptiveElementTimeout(120000), 30000);
+  });
+
+  test("adaptive: custom floor + ceiling are honoured", () => {
+    // p95 = 4000 → 2x = 8000 inside [1000, 10000].
+    assert.equal(computeAdaptiveElementTimeout(4000, { floor: 1000, ceiling: 10000 }), 8000);
+    // p95 = 200 → 2x = 400 below custom floor 1000 → floor.
+    assert.equal(computeAdaptiveElementTimeout(200, { floor: 1000, ceiling: 10000 }), 1000);
+  });
+
+  test("adaptive: non-finite p95 falls through to floor", () => {
+    assert.equal(computeAdaptiveElementTimeout(NaN), 5000);
+    assert.equal(computeAdaptiveElementTimeout(Infinity), 5000);
+    assert.equal(computeAdaptiveElementTimeout(-1), 5000);
+  });
+
+  // ── shouldEnumerateFrame — iframe strategy gate ───────────────────────
+  test("shouldEnumerateFrame: about:blank is always rejected", () => {
+    assert.equal(shouldEnumerateFrame("about:blank", "https://app.example.com", "all"), false);
+    assert.equal(shouldEnumerateFrame("about:blank", "https://app.example.com", "same-origin"), false);
+  });
+
+  test("shouldEnumerateFrame: 'none' strategy rejects every frame", () => {
+    assert.equal(shouldEnumerateFrame("https://app.example.com/widget", "https://app.example.com", "none"), false);
+  });
+
+  test("shouldEnumerateFrame: 'all' accepts cross-origin frames", () => {
+    assert.equal(shouldEnumerateFrame("https://js.stripe.com/v3/", "https://shop.example.com", "all"), true);
+  });
+
+  test("shouldEnumerateFrame: 'same-origin' accepts same-origin, rejects cross-origin", () => {
+    assert.equal(shouldEnumerateFrame("https://app.example.com/widget", "https://app.example.com", "same-origin"), true);
+    assert.equal(shouldEnumerateFrame("https://js.stripe.com/v3/", "https://shop.example.com", "same-origin"), false);
+  });
+
+  test("shouldEnumerateFrame: 'allowlist' accepts only URL-prefix matches", () => {
+    const list = ["https://js.stripe.com/", "https://widget.intercom.io/"];
+    assert.equal(shouldEnumerateFrame("https://js.stripe.com/v3/elements", "https://shop.example.com", "allowlist", list), true);
+    assert.equal(shouldEnumerateFrame("https://widget.intercom.io/abc123", "https://shop.example.com", "allowlist", list), true);
+    assert.equal(shouldEnumerateFrame("https://evil.example.com/", "https://shop.example.com", "allowlist", list), false);
+  });
+
+  test("shouldEnumerateFrame: 'allowlist' with empty list rejects everything", () => {
+    assert.equal(shouldEnumerateFrame("https://js.stripe.com/v3/", "https://shop.example.com", "allowlist", []), false);
+    assert.equal(shouldEnumerateFrame("https://js.stripe.com/v3/", "https://shop.example.com", "allowlist"), false);
+  });
+
+  // ── selfHealing helper string carries the adaptive timeout ────────────
+  test("selfHealing: explicit elementTimeout is baked into DEFAULT_TIMEOUT", () => {
+    const code = getSelfHealingHelperCode({}, { elementTimeout: 17000 });
+    assert.match(code, /const DEFAULT_TIMEOUT = 17000;/,
+      "elementTimeout did not propagate into the emitted helper string");
+  });
+
+  test("selfHealing: omitted elementTimeout falls back to env default (5000)", () => {
+    const code = getSelfHealingHelperCode({});
+    // The env default is `HEALING_ELEMENT_TIMEOUT` which defaults to 5000
+    // when the env var is unset (matches the constant at the top of
+    // `selfHealing.js`).
+    assert.match(code, /const DEFAULT_TIMEOUT = 5000;/,
+      "omitted elementTimeout did not fall back to the env default");
+  });
+
+  test("selfHealing: garbage elementTimeout values fall back safely", () => {
+    // NaN / negative / non-integer must not corrupt the emitted constant.
+    const cases = [NaN, -1, 1.5, "12000", null];
+    for (const bad of cases) {
+      const code = getSelfHealingHelperCode({}, { elementTimeout: bad });
+      assert.match(code, /const DEFAULT_TIMEOUT = 5000;/,
+        `bad elementTimeout=${String(bad)} should fall back to env default`);
+    }
+  });
+
+  console.log(`\n  ${passed} passed, ${failed} failed\n`);
+  if (failed > 0) process.exit(1);
+}
+
+main();

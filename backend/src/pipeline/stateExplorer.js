@@ -25,7 +25,7 @@
  */
 
 import { throwIfAborted } from "../utils/abortHelper.js";
-import { takeSnapshot } from "./pageSnapshot.js";
+import { takeSnapshot, waitForSpaHydration } from "./pageSnapshot.js";
 import { fingerprintState, statesEqual } from "./stateFingerprint.js";
 import { discoverActions, detectSignupIntent } from "./actionDiscovery.js";
 import { fillEmailVerificationFlow, waitForVerification, dispose } from "../utils/disposableEmail.js";
@@ -217,6 +217,14 @@ function effectiveUrlCap(existingSnapshots) {
 }
 
 async function captureState(page, ctx) {
+  // AUDIT-ROADMAP B2 — framework-aware hydration wait. `ctx.project` is
+  // forwarded by `exploreStates` so the snapshot captures the post-
+  // hydration DOM rather than the skeleton. Best-effort: a missing
+  // project (defensive) falls through to legacy networkidle-only wait
+  // inside `takeSnapshot`.
+  if (ctx.project) {
+    await waitForSpaHydration(page, ctx.project);
+  }
   const snapshot = await takeSnapshot(page);
   const fp = fingerprintState(snapshot);
   const isNovel = !ctx.states.has(fp);
@@ -419,7 +427,9 @@ export async function exploreStates(project, run, { signal, tuning } = {}) {
   // B1.3 (AUDIT-ROADMAP) — `ctx.run` lets `captureState` persist each novel
   // snapshot to `crawl_snapshots` without rippling a new arg through every
   // helper callsite.
-  const ctx = { states: new Set(), edges: [], snapshotsByFp: new Map(), snapshots: [], snapshotsByUrl: {}, pathPatternsSeen: new Set(), queue: [], limits, run };
+  // AUDIT-ROADMAP B2 — `ctx.project` lets `captureState` run the SPA
+  // hydration wait under the project's `hydrationType` before snapshotting.
+  const ctx = { states: new Set(), edges: [], snapshotsByFp: new Map(), snapshots: [], snapshotsByUrl: {}, pathPatternsSeen: new Set(), queue: [], limits, run, project };
   let startState = null;
   let harCapture = null;
 

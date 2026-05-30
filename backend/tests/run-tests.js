@@ -313,6 +313,14 @@ const files = [
   // Pins the (runId, url) UNIQUE idempotency, load-ms percentile feed for
   // Bundle 2's adaptive timeout, and the purge-path delete primitives.
   "tests/crawl-snapshot-streaming.test.js",
+  // B2 (AUDIT-ROADMAP Bundle 2) — iframe enumeration + SPA hydration +
+  // adaptive element timeout. Pure-function contracts: p95 (R-7 linear
+  // interpolation), computeAdaptiveElementTimeout (clamp to [floor, ceiling]),
+  // shouldEnumerateFrame (iframe strategy gate), and
+  // getSelfHealingHelperCode's adaptive-timeout injection into the vm
+  // sandbox helper string. Browser-level enumeration + hydration are
+  // covered by QA.md § "iframe + SPA hydration (B2)".
+  "tests/b2-adaptive-timeout.test.js",
   "tests/run-worker-shard-retry.test.js",
   "tests/run-abort-pubsub.test.js",
   "tests/run-shard-crash.test.js",

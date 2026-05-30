@@ -9,7 +9,7 @@
 
 import { throwIfAborted } from "../utils/abortHelper.js";
 import { SmartCrawlQueue, fingerprintStructure, extractPathPattern, stripNoiseParams } from "./smartCrawl.js";
-import { takeSnapshot } from "./pageSnapshot.js";
+import { takeSnapshot, waitForSpaHydration } from "./pageSnapshot.js";
 import { log, logWarn, logSuccess, emitRunEvent } from "../utils/runLogger.js";
 import * as runRepo from "../database/repositories/runRepo.js";
 import * as crawlSnapshotRepo from "../database/repositories/crawlSnapshotRepo.js";
@@ -66,6 +66,97 @@ function isSameEffectiveOrigin(urlA, urlB) {
     const normHost = h => h.replace(/^www\./i, "").toLowerCase();
     return a.protocol === b.protocol && normHost(a.hostname) === normHost(b.hostname) && a.port === b.port;
   } catch { return false; }
+}
+
+/**
+ * AUDIT-ROADMAP B2 — decide whether a frame should be enumerated under the
+ * project's `iframeStrategy`. Pure function — exported for unit tests.
+ *
+ * @param {string} frameUrl
+ * @param {string} parentUrl
+ * @param {string} strategy   One of `same-origin` | `allowlist` | `all` | `none`.
+ * @param {string[]} [allowlist]  URL-prefix array (used only when strategy === 'allowlist').
+ * @returns {boolean}
+ */
+export function shouldEnumerateFrame(frameUrl, parentUrl, strategy, allowlist) {
+  if (!frameUrl || frameUrl === "about:blank") return false;
+  if (strategy === "none") return false;
+  if (strategy === "all") return true;
+  if (strategy === "allowlist") {
+    if (!Array.isArray(allowlist) || allowlist.length === 0) return false;
+    return allowlist.some((prefix) => prefix && frameUrl.startsWith(prefix));
+  }
+  // Default — same-origin.
+  return isSameEffectiveOrigin(frameUrl, parentUrl);
+}
+
+/**
+ * AUDIT-ROADMAP B2 — enumerate iframes on a page, snapshot each eligible
+ * frame, and persist per-frame snapshots to `crawl_snapshots` with
+ * `fromIframe: true` so downstream consumers (test generation,
+ * playwrightSelectorGenerator) can wrap selectors in `page.frameLocator()`.
+ *
+ * Strictly best-effort: cross-origin frames produce a `SecurityError` on
+ * any DOM access (browser policy); each is logged and skipped without
+ * failing the crawl. The parent-page snapshot is unaffected — frame
+ * enumeration only ADDS rows, never replaces them.
+ *
+ * @param {Object} page                  Playwright Page object.
+ * @param {string} parentUrl
+ * @param {Object} project               Project row (iframeStrategy, iframeAllowlist).
+ * @param {Object} run                   Run record (for log).
+ * @returns {Promise<{ count: number, skipped: number }>}
+ */
+async function enumerateFrameSnapshots(page, parentUrl, project, run) {
+  const strategy = project?.iframeStrategy || "same-origin";
+  if (strategy === "none") return { count: 0, skipped: 0 };
+
+  const allowlist = Array.isArray(project?.iframeAllowlist) ? project.iframeAllowlist : [];
+  let count = 0;
+  let skipped = 0;
+  let frames;
+  try { frames = page.frames(); } catch { return { count: 0, skipped: 0 }; }
+
+  for (const frame of frames) {
+    if (frame === page.mainFrame()) continue;
+    const frameUrl = frame.url();
+    if (!shouldEnumerateFrame(frameUrl, parentUrl, strategy, allowlist)) {
+      skipped++;
+      continue;
+    }
+    try {
+      // SPA-style hydration wait inside the frame mirrors the parent page.
+      // Best-effort: cross-origin frames throw on evaluate() and fall to
+      // the outer catch.
+      await waitForSpaHydration(frame, project);
+      const snap = await takeSnapshot(frame);
+      snap._fromIframe = true;
+      snap.iframeSrc = frameUrl;
+      try {
+        crawlSnapshotRepo.save(run.id, frameUrl, snap, {
+          loadMs: null, // we don't time individual frame navigations
+          fromIframe: true,
+          iframeSrc: frameUrl,
+        });
+      } catch (persistErr) {
+        logWarn(run, `Failed to persist iframe snapshot for ${frameUrl}: ${persistErr.message}`);
+      }
+      count++;
+    } catch (err) {
+      // Cross-origin DOM access throws SecurityError — the common case for
+      // payment widgets, Intercom, etc. Surface as structured info rather
+      // than warning so logs stay clean.
+      const msg = err?.message || String(err);
+      if (msg.includes("SecurityError") || msg.includes("cross-origin")) {
+        log(run, `⚠ Skipping cross-origin iframe: ${frameUrl}`);
+      } else {
+        logWarn(run, `iframe snapshot failed for ${frameUrl}: ${msg}`);
+      }
+      skipped++;
+    }
+  }
+  if (count > 0) log(run, `🪟 iframes: ${count} captured, ${skipped} skipped (${strategy})`);
+  return { count, skipped };
 }
 
 /**
@@ -214,6 +305,15 @@ export async function crawlPages(project, run, { signal } = {}) {
         // takeSnapshot() now calls waitForLoadState('networkidle') internally,
         // so we no longer need the arbitrary 800ms static wait here.
 
+        // AUDIT-ROADMAP B2 — SPA hydration wait. React/Vue/Angular/Next.js
+        // apps populate the interactive DOM 200–2 000 ms after `domcontentloaded`
+        // fires; without this wait the snapshot captures skeleton state and
+        // generated tests target elements that don't exist at execution time.
+        // Best-effort: apps without a recognisable loading indicator fall
+        // through after `HYDRATION_WAIT_MS` (env, default 5 000) and the
+        // crawl proceeds unchanged.
+        await waitForSpaHydration(page, project);
+
         // ── Shadow DOM: inject queryShadowAll helper and collect elements ──
         // Modern enterprise apps (Angular, Lit, Stencil, Salesforce LWC) encapsulate
         // UI inside shadow roots that are invisible to standard page.$$() queries.
@@ -333,6 +433,16 @@ export async function crawlPages(project, run, { signal } = {}) {
           crawlSnapshotRepo.save(run.id, url, snapshot, { loadMs });
         } catch (persistErr) {
           logWarn(run, `Failed to persist crawl snapshot for ${url}: ${persistErr.message}`);
+        }
+
+        // AUDIT-ROADMAP B2 — enumerate same-origin (or allowlisted)
+        // iframes on this page and persist their snapshots with
+        // `fromIframe: true`. Strictly best-effort and isolated from the
+        // outer catch so a single bad frame can't fail the parent crawl.
+        try {
+          await enumerateFrameSnapshots(page, url, project, run);
+        } catch (frameErr) {
+          logWarn(run, `iframe enumeration failed for ${url}: ${frameErr.message}`);
         }
 
         snapshots.push(snapshot);
