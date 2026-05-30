@@ -8,6 +8,7 @@
  * |------------------------|---------------------|
  * | `/api/v1/projects`     | `routes/projects`   |
  * | `/api/v1` (tests)      | `routes/tests`      |
+ * | `/api/v1` (recorder)   | `routes/recorder`   |
  * | `/api/v1` (runs)       | `routes/runs`       |
  * | `/api/v1` (SSE)        | `routes/sse`        |
  * | `/api/v1` (dashboard)  | `routes/dashboard`  |
@@ -53,6 +54,7 @@ import { workspaceScope } from "./middleware/workspaceScope.js";
 // ─── Route modules ────────────────────────────────────────────────────────────
 import projectsRouter from "./routes/projects.js";
 import testsRouter from "./routes/tests.js";
+import recorderRouter from "./routes/recorder.js";
 import runsRouter from "./routes/runs.js";
 import triggerRouter from "./routes/trigger.js";
 import sseRouter from "./routes/sse.js";
@@ -339,6 +341,7 @@ app.post(aiMutationPaths, requireAuth, workspaceScope, aiMutationLimiter);
 
 app.use(`${API_PREFIX}/projects`, requireAuth, workspaceScope, projectsRouter);
 app.use(API_PREFIX, requireAuth, workspaceScope, testsRouter);
+app.use(API_PREFIX, requireAuth, workspaceScope, recorderRouter);
 app.use(API_PREFIX, requireAuth, workspaceScope, runsRouter);
 app.use(API_PREFIX, requireAuth, workspaceScope, sseRouter);
 app.use(API_PREFIX, requireAuth, workspaceScope, dashboardRouter);
