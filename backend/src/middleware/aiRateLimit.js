@@ -47,6 +47,14 @@ export function aiRateLimit(opts = {}) {
       const cap = cost > 1 ? aiCap : regularCap;
       const key = `${workspaceId}:ai`;
       const { value, ttl } = await incrWithExpiry(key, cost, windowSec);
+      // IETF draft "ratelimit-headers" + GitHub / Stripe / OpenAI convention.
+      // Emit on every response (not just 429) so well-behaved clients can
+      // pre-emptively back off before tripping the cap. `Remaining` clamps
+      // at 0 on the rejecting request so clients don't see negatives.
+      const remaining = Math.max(0, cap - value);
+      res.setHeader("RateLimit-Limit", String(cap));
+      res.setHeader("RateLimit-Remaining", String(remaining));
+      res.setHeader("RateLimit-Reset", String(ttl));
       if (value > cap) {
         const role = req.workspaceRole || req.userRole || req.user?.role || "unknown";
         aiRateLimitedTotal.inc({ workspace_role: role });

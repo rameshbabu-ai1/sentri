@@ -72,6 +72,27 @@ async function main() {
     assert.equal(out.res.statusCode, 200);
   });
 
+  await run("emits RateLimit-* headers on allow path", async () => {
+    const mw = aiRateLimit({ aiCap: 100, regularCap: 100, windowSec: 60, costFn: () => 10 });
+    const workspaceId = `ws-headers-${Date.now()}`;
+    const out = await invoke(mw, createReq({ workspaceId }));
+    assert.equal(out.nextCalled, true);
+    assert.equal(out.res.headers["ratelimit-limit"], "100");
+    assert.equal(out.res.headers["ratelimit-remaining"], "90");
+    assert.ok(Number(out.res.headers["ratelimit-reset"]) > 0);
+  });
+
+  await run("emits RateLimit-* headers + Retry-After on 429", async () => {
+    const mw = aiRateLimit({ aiCap: 10, regularCap: 100, windowSec: 60, costFn: () => 10 });
+    const workspaceId = `ws-headers-429-${Date.now()}`;
+    await invoke(mw, createReq({ workspaceId }));
+    const out = await invoke(mw, createReq({ workspaceId }));
+    assert.equal(out.res.statusCode, 429);
+    assert.equal(out.res.headers["ratelimit-limit"], "10");
+    assert.equal(out.res.headers["ratelimit-remaining"], "0");
+    assert.ok(Number(out.res.headers["retry-after"]) > 0);
+  });
+
   if (failed) process.exit(1);
   console.log(`ai-rate-limit.test.js: ${passed} passed`);
 }

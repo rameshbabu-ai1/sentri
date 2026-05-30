@@ -318,19 +318,24 @@ app.get("/api/docs", (req, res) => {
 </html>`);
 });
 
-// All other API routes require a valid JWT token + workspace context (ACL-001).
-// workspaceScope injects req.workspaceId and req.userRole from the JWT or DB.
+// MNT-015 — per-workspace AI cost-weighted limiter. Mounted at the API
+// prefix BEFORE the route-level chains below so it runs exactly once,
+// but AFTER `requireAuth` + `workspaceScope` so `req.workspaceId` is set.
+// Path-matched + POST-only so auth, SSE, /health, and every GET bypass
+// the bucket (NEXT.md acceptance criterion). The router-level chains
+// below re-run `requireAuth` + `workspaceScope` for non-AI routes — a
+// matched AI request is short-circuited here at 429 BEFORE reaching the
+// router, so auth runs at most twice on the allow-path (cheap: cached
+// JWT decode) and once on the rejected path.
 const aiMutationLimiter = aiRateLimit();
 const aiMutationPaths = [
-  "/chat",
-  "/projects/:id/crawl",
-  "/projects/:id/tests/generate",
-  "/tests/:testId/fix",
-  "/settings/agent-roles/:role/test",
+  `${API_PREFIX}/chat`,
+  `${API_PREFIX}/projects/:id/crawl`,
+  `${API_PREFIX}/projects/:id/tests/generate`,
+  `${API_PREFIX}/tests/:testId/fix`,
+  `${API_PREFIX}/settings/agent-roles/:role/test`,
 ];
-for (const routePath of aiMutationPaths) {
-  app.post(`${API_PREFIX}${routePath}`, requireAuth, workspaceScope, aiMutationLimiter);
-}
+app.post(aiMutationPaths, requireAuth, workspaceScope, aiMutationLimiter);
 
 app.use(`${API_PREFIX}/projects`, requireAuth, workspaceScope, projectsRouter);
 app.use(API_PREFIX, requireAuth, workspaceScope, testsRouter);

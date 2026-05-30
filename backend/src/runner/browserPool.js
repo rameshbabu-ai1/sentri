@@ -6,14 +6,31 @@
 import { DEFAULT_PARALLEL_WORKERS, launchBrowser, resolveBrowser } from "./config.js";
 import {
   browserPoolAcquiresTotal,
+  browserPoolAcquireWaitSeconds,
+  browserPoolDisconnectsTotal,
   browserPoolInUse,
   browserPoolSize,
 } from "../utils/metrics.js";
+import { formatLogLine } from "../utils/logFormatter.js";
 
+// MAX_WORKERS governs BullMQ run-job concurrency (per-replica). PARALLEL_WORKERS
+// governs concurrent browser contexts inside ONE run (1–10). The pool must
+// have enough warm slots to serve the *larger* of the two so a single
+// parallel run on a quiet queue doesn't queue every test behind a tiny pool.
+// `BROWSER_POOL_SIZE` is the explicit operator override.
 function parsePoolSize() {
-  const raw = process.env.BROWSER_POOL_SIZE || process.env.WORKER_CONCURRENCY || process.env.MAX_WORKERS;
+  const raw = process.env.BROWSER_POOL_SIZE;
   const parsed = Number.parseInt(raw, 10);
-  return Math.max(1, Math.min(50, Number.isFinite(parsed) ? parsed : Math.max(2, DEFAULT_PARALLEL_WORKERS)));
+  if (Number.isFinite(parsed)) return Math.max(1, Math.min(50, parsed));
+  const maxWorkers = Number.parseInt(process.env.MAX_WORKERS, 10);
+  const workerConcurrency = Number.parseInt(process.env.WORKER_CONCURRENCY, 10);
+  const derived = Math.max(
+    DEFAULT_PARALLEL_WORKERS,
+    Number.isFinite(maxWorkers) ? maxWorkers : 0,
+    Number.isFinite(workerConcurrency) ? workerConcurrency : 0,
+    2,
+  );
+  return Math.max(1, Math.min(50, derived));
 }
 
 function normaliseContextOptions({ contextOptions = {}, viewport, locale, timezone } = {}) {
@@ -76,6 +93,24 @@ export class BrowserPool {
       bucket.launching = this.launcher({ browser: bucket.type })
         .then((browser) => {
           bucket.browser = browser;
+          // Eagerly evict the cached browser on `disconnected` so the next
+          // `acquire()` re-launches instead of handing out a dead handle.
+          // Without this hook the only check is `isConnected()` at acquire
+          // time — a disconnect mid-test (Chromium OOM kill, CDP socket
+          // hang-up) would surface only at the next acquire, AFTER N more
+          // tests had already tried to lease a dead browser. Best-effort:
+          // browsers without an `.on()` (test doubles, future Playwright
+          // shape change) skip the wire-up.
+          if (typeof browser.on === "function") {
+            browser.on("disconnected", () => {
+              if (bucket.browser === browser) {
+                browserPoolDisconnectsTotal.inc({ type: bucket.type });
+                console.warn(formatLogLine("warn", null,
+                  `[browserPool] ${bucket.type} disconnected — evicting from pool, next acquire will relaunch`));
+                bucket.browser = null;
+              }
+            });
+          }
           return browser;
         })
         .finally(() => { bucket.launching = null; });
@@ -132,10 +167,31 @@ export class BrowserPool {
   async acquire(args = {}) {
     if (this.draining) throw new Error("Browser pool is draining");
     const bucket = this._getBucket(args.browserType);
-    if (bucket.inUse < this.size) return this._createLease(bucket, args);
+    const startNs = process.hrtime.bigint();
+    if (bucket.inUse < this.size) {
+      const lease = await this._createLease(bucket, args);
+      const elapsed = Number(process.hrtime.bigint() - startNs) / 1e9;
+      // Distinguish hit (browser already warm) vs miss (cold launch). The
+      // counter inside `_createLease` is the canonical hit/miss source;
+      // we infer from `inUse` here because the lease shape doesn't carry
+      // the flag. Cheap proxy: a wait of <50 ms is effectively a hit.
+      browserPoolAcquireWaitSeconds.observe(
+        { type: bucket.type, outcome: elapsed < 0.05 ? "hit" : "miss" },
+        elapsed,
+      );
+      return lease;
+    }
     browserPoolAcquiresTotal.inc({ type: bucket.type, outcome: "queue" });
     return new Promise((resolve, reject) => {
-      bucket.waiters.push({ args, resolve, reject });
+      bucket.waiters.push({
+        args,
+        resolve: (lease) => {
+          const elapsed = Number(process.hrtime.bigint() - startNs) / 1e9;
+          browserPoolAcquireWaitSeconds.observe({ type: bucket.type, outcome: "queue" }, elapsed);
+          resolve(lease);
+        },
+        reject,
+      });
     });
   }
 

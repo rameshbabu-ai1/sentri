@@ -16,9 +16,18 @@ function createFakeLauncher() {
     browsers,
     async launch() {
       launches += 1;
+      const listeners = new Map();
       const browser = {
         closed: false,
         isConnected: () => !browser.closed,
+        on(event, fn) {
+          const arr = listeners.get(event) || [];
+          arr.push(fn);
+          listeners.set(event, arr);
+        },
+        emit(event, ...args) {
+          for (const fn of listeners.get(event) || []) fn(...args);
+        },
         async newContext(options) {
           const pages = [];
           const context = {
@@ -38,7 +47,10 @@ function createFakeLauncher() {
           contexts.push(context);
           return context;
         },
-        async close() { this.closed = true; },
+        async close() {
+          browser.closed = true;
+          browser.emit("disconnected");
+        },
       };
       browsers.push(browser);
       return browser;
@@ -108,6 +120,21 @@ async function main() {
     assert.equal(pool.getStats()[0].inUse, 2);
     await en.release();
     await it.release();
+    await pool.drainAndClose();
+  });
+
+  await run("evicts the browser on disconnected and relaunches on next acquire", async () => {
+    const fake = createFakeLauncher();
+    const pool = new BrowserPool({ size: 2, launcher: fake.launch });
+    const first = await pool.acquire({ browserType: "chromium" });
+    await first.release();
+    // Simulate an unexpected Chromium crash / CDP socket drop.
+    fake.browsers[0].closed = true;
+    fake.browsers[0].emit("disconnected");
+    const second = await pool.acquire({ browserType: "chromium" });
+    assert.equal(fake.launches, 2);
+    assert.notEqual(fake.browsers[1], fake.browsers[0]);
+    await second.release();
     await pool.drainAndClose();
   });
 
