@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **AUTO-014** — Tests can declare dependencies so prerequisite tests run first and downstream tests are skipped with clear upstream-failure badges.
 - **B1** — Test results survive a server crash or OOM kill mid-run, so a 500-test suite that dies at test 490 no longer loses everything.
 - **B1** — Crash-recovered runs surface in the UI with an Interrupted badge and an admin-only Resume button that re-runs only the tests that didn't finish.
 - **B1** — Large crawls now use far less memory, so operators can crawl significantly larger sites on the same container without OOM kills.
@@ -40,7 +41,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **AUTO-014** — Tests can declare dependencies so prerequisite tests run first and downstream tests are skipped with clear upstream-failure badges.
 - **CR-004 / TD-004** — `backend/scripts/lint-migrations.mjs` fails CI on any new duplicate numeric prefix in `backend/src/database/migrations/`. Existing collisions (`007`, `015`, `021`, `035`, `036`, `037`, `054`, `059`) are grandfathered with a warning; new collisions exit non-zero. Wired into `.github/workflows/ci.yml` as a backend job step.
 - **CR-009** — Per-run, per-process SSE listener cap (`SSE_MAX_LISTENERS_PER_RUN`, default 50) in `backend/src/routes/sse.js`. New connections beyond the cap return HTTP 503 with `Retry-After` instead of growing `runListeners` without bound on connection leaks.
 - **§11.2** — Shipped `monitoring/grafana/sentri-overview.json` — 15-panel operations dashboard covering API RED metrics, run pipeline outcomes, BullMQ queue depth, AI provider health (calls / errors / p99 latency / cost / cache hit rate), and Node.js runtime gauges. Each alerting panel is title-tagged with the matching alert from `monitoring/prometheus/alerts.yml` so on-call engineers can pivot alert → panel in one click. Import via Grafana UI or file-provision per `monitoring/grafana/README.md`.
@@ -102,7 +102,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **AUTO-014** — Tests can declare dependencies so prerequisite tests run first and downstream tests are skipped with clear upstream-failure badges.
 - Workspace-wide save/update/delete confirmations via a global toast surface. Success toasts dismiss after 3.5 s, errors after 5 s, and toasts with an action button (e.g. Undo) linger 5 s. Toasts have a manual dismiss × button. (#40)
 - **A11Y** — Toasts announce to screen readers via `role="alert"` (errors) and `role="status"` (success / info). (#40)
 - **UX** — Bulk approve / reject on Review Queue now offers an inline **Undo** action on the success toast that restores affected tests to Draft. (#40)
@@ -123,7 +122,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **AUTO-014** — Tests can declare dependencies so prerequisite tests run first and downstream tests are skipped with clear upstream-failure badges.
 - **AUTO-023 Bundle 5** — Thread-scoped shared blackboard (`get`/`setKey`/`casUpdate`) with optimistic concurrency and a 64 KB size cap (`AGENT_THREAD_STATE_MAX_BYTES`).
 - **AUTO-023 Bundle 5** — Closed-set tool registry with five read-only tools and per-role visibility intersected with `agent_configs.allowedTools`. (#38)
 - **AUTO-023 Bundle 5** — Server-side tool dispatch with 30 s timeout, per-tool rate limiting, `AbortSignal` propagation, and secret scrubbing. (#38)

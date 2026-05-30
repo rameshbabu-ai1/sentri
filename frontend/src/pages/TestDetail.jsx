@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef, Suspense, lazy } from "react";
+import React, { useEffect, useMemo, useState, useCallback, useRef, Suspense, lazy } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   Play, Edit2, RefreshCw, Download,
@@ -78,6 +78,12 @@ export default function TestDetail() {
   const projectTestsQuery = useProjectTestsQuery(test?.projectId);
   const projectTests = projectTestsQuery.data ?? [];
   const loading = detailQuery.isLoading;
+  // AUTO-014: candidates for the "Depends on" multi-select are every test
+  // in this project except the one being edited (self-reference is a cycle).
+  const dependencyOptions = useMemo(
+    () => projectTests.filter((t) => t.id !== testId),
+    [projectTests, testId],
+  );
   const [running, setRunning] = useState(false);
   const { showToast } = useToast();
 
@@ -102,6 +108,15 @@ export default function TestDetail() {
   const [editDependsOn, setEditDependsOn] = useState([]);
   const [saving, setSaving]             = useState(false);
   const [editError, setEditError]       = useState(null);
+  // AUTO-014: live cycle check while editing; mirrors the backend cycle
+  // detector via the shared `utils/dependencyGraph.js` helper so the user
+  // sees the same diagnostic the server would reject the save with.
+  const dependencyCycle = useMemo(() => {
+    if (!editing) return null;
+    return findDependencyCycle(
+      projectTests.map((t) => t.id === testId ? { ...t, dependsOn: editDependsOn } : t),
+    );
+  }, [editing, projectTests, testId, editDependsOn]);
 
   const [editingIssueKey, setEditingIssueKey] = useState(false);
   const [issueKeyDraft, setIssueKeyDraft]     = useState("");

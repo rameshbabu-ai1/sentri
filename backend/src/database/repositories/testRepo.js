@@ -62,7 +62,7 @@ const INSERT_COLS = [
   "aiFixAppliedAt", "codeVersion", "workspaceId", "isStale", "flakyScore",
   "confidenceScore", "approvalSource", "approvalThreshold", "approvedAt", "approvedBy",
   "reviewComment", // migration 054 — free-text "why is this draft?" explainer
-  "dependsOn", // migration 065 — upstream test IDs that must pass first
+  "dependsOn", // migration 068 — upstream test IDs that must pass first (AUTO-014)
 ];
 
 const INSERT_SQL = `INSERT INTO tests (${INSERT_COLS.join(", ")})
