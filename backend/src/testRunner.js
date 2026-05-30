@@ -542,6 +542,19 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
       });
       await traceContext.tracing.start({ screenshots: true, snapshots: true, sources: false });
     } catch (ctxErr) {
+      // Close the half-built trace context on its way out. The pre-MNT-015
+      // path relied on `browser.close()` (later in the original `finally`)
+      // to implicitly close every context — but the browser is now pooled
+      // and lives past this run, so an unclosed `traceContext` would leak
+      // a viewport buffer + tracing state on the warm browser process.
+      // The `finally` block at the bottom of this file's try-block also
+      // closes `traceContext` on the success path, but only if we make it
+      // there — a `tracing.start()` failure throws BEFORE the inner try
+      // (line 716), so its `finally` never runs for this branch.
+      if (traceContext) {
+        await traceContext.close().catch(() => {});
+        traceContext = null;
+      }
       const classified = classifyError(ctxErr, "run");
       run.status = "failed";
       run.error = classified.message;
