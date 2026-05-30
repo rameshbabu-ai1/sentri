@@ -4,6 +4,21 @@
  */
 
 import { getDatabase } from "../sqlite.js";
+// B1.2 (AUDIT-ROADMAP) — route the hot `set()` write through the
+// write-batching queue so `parallelWorkers > 1` worker fan-outs amortise
+// the SQLite BEGIN/COMMIT round-trip. Spec at
+// `docs/roadmap/AUDIT-ROADMAP.md:176-179` enumerates `healingRepo.set()`
+// as one of the three highest-frequency paths to route through the queue;
+// without this wiring the throughput acceptance criterion at `:279-280`
+// (≥ 20% p50 reduction at parallelWorkers=10) cannot be met. The reads
+// (`get`, `getByTestId`, etc.) stay synchronous — they're the hot path
+// for the per-test waterfall and must observe the latest writes
+// immediately. B7-4 will later promote circuit-breaker writes (when
+// `failCount` crosses the threshold) to `priority: "durable"` so they
+// survive a SIGKILL; B1 ships the batched default that's strictly
+// better than the pre-B1 baseline on graceful shutdown (drain hook in
+// `index.js` + `worker.js` flushes everything).
+import { enqueue as enqueueDbWrite } from "../../utils/dbWriteQueue.js";
 
 /**
  * Get a healing entry by key.
@@ -73,21 +88,35 @@ function chunkedTestIdQuery(db, testIds, sqlFn) {
 
 export function set(key, entry) {
   const db = getDatabase();
+  // Schema migration must run synchronously — the queued INSERT depends
+  // on the column existing. Cheap (idempotent boolean cache after first
+  // call) so the marginal overhead vs deferring is negligible.
   ensureStrategyVersionColumn(db);
-  db.prepare(`
-    INSERT INTO healing_history (key, strategyIndex, succeededAt, failCount, strategyVersion)
-    VALUES (@key, @strategyIndex, @succeededAt, @failCount, @strategyVersion)
-    ON CONFLICT(key) DO UPDATE SET
-      strategyIndex = @strategyIndex,
-      succeededAt = @succeededAt,
-      failCount = @failCount,
-      strategyVersion = @strategyVersion
-  `).run({
+  // Snapshot the params into a plain object up-front so a caller that
+  // mutates `entry` between enqueue and flush doesn't change what gets
+  // persisted. The closure below captures the snapshot by value.
+  const params = {
     key,
     strategyIndex: entry.strategyIndex ?? -1,
     succeededAt: entry.succeededAt || null,
     failCount: entry.failCount || 0,
     strategyVersion: entry.strategyVersion ?? null,
+  };
+  // B1.2 — batched by default (lossy ≤ DB_WRITE_FLUSH_MS on SIGKILL,
+  // strictly better than baseline on SIGTERM via drain hook). Postgres
+  // dialect bypasses the queue (passthrough) so multi-replica deployments
+  // pay no batching latency. The graceful-shutdown drain in `index.js`
+  // and `worker.js` flushes everything before `closeDatabase()`.
+  enqueueDbWrite(() => {
+    db.prepare(`
+      INSERT INTO healing_history (key, strategyIndex, succeededAt, failCount, strategyVersion)
+      VALUES (@key, @strategyIndex, @succeededAt, @failCount, @strategyVersion)
+      ON CONFLICT(key) DO UPDATE SET
+        strategyIndex = @strategyIndex,
+        succeededAt = @succeededAt,
+        failCount = @failCount,
+        strategyVersion = @strategyVersion
+    `).run(params);
   });
 }
 

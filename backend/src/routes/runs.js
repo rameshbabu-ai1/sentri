@@ -814,6 +814,13 @@ router.post("/runs/:runId/resume", requireRole("admin"), expensiveOpLimiter, asy
   // `runRepo.create` and `runRepo.update` both call `getDatabase()` under
   // the hood, so wrapping their callsites in `db.transaction(...)` here
   // funnels both statements into a single BEGIN/COMMIT.
+  //
+  // **NOTE — async BullMQ enqueue is OUTSIDE this transaction.** The
+  // queue write happens below and can fail with 503; if it does, we
+  // revert the original run's `failureReason` back to `process_crash`
+  // in the catch arm so the operator can re-attempt resume instead of
+  // being permanently locked out by an enqueue glitch. See the rationale
+  // at the catch site (line below).
   const db = getDatabase();
   db.transaction(() => {
     runRepo.create(newRun);
@@ -849,7 +856,20 @@ router.post("/runs/:runId/resume", requireRole("admin"), expensiveOpLimiter, asy
         },
       }, { jobId: newRunId });
     } catch (enqueueErr) {
+      // Roll back the new run AND restore the original's resumability.
+      // Without the revert below, the original run's `failureReason` stays
+      // `'resumed'` from the transaction above and the gate at line 688
+      // (`failureReason !== 'process_crash'`) permanently rejects all
+      // future resume attempts on RUN-1 — the operator's only recourse
+      // would be `POST /run` which restarts from zero, defeating B1's
+      // entire crash-recovery contract for what's effectively a transient
+      // Redis hiccup. The revert closes that trap so a 503 is genuinely
+      // retryable (industry-standard pattern: distinguish "permanent
+      // failure" from "retry-after-network-blip").
       runRepo.update(newRunId, { status: "failed", error: "Failed to enqueue job", finishedAt: new Date().toISOString() });
+      try {
+        runRepo.update(req.params.runId, { failureReason: "process_crash" });
+      } catch { /* best-effort — original row may have been deleted concurrently */ }
       return res.status(503).json({ error: "Job queue unavailable. Please try again." });
     }
   } else {
