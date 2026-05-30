@@ -425,7 +425,8 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
   // the smoke / non-smoke partitions.
   const smokeTests = tests.filter((t) => isSmokeTest(t));
   const nonSmokeTests = tests.filter((t) => !isSmokeTest(t));
-  const { ordered: orderedNonSmokeTests, skipped: missingDependencySkipped } = topologicalSortTests(nonSmokeTests);
+  const smokeTestIds = smokeTests.map((t) => t.id).filter(Boolean);
+  const { ordered: orderedNonSmokeTests, skipped: missingDependencySkipped } = topologicalSortTests(nonSmokeTests, { satisfiedTestIds: smokeTestIds });
   tests = [
     ...smokeTests,
     ...orderedNonSmokeTests,

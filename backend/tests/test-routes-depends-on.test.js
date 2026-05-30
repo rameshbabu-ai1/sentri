@@ -64,6 +64,15 @@ async function main() {
     out = await t.req(base, `/api/v1/tests/TC-A`, {
       method: "PATCH",
       token,
+      body: { dependsOn: [42] },
+    });
+    assert.equal(out.res.status, 400);
+    assert.equal(out.json.code, "INVALID_DEPENDS_ON");
+    assert.equal(out.json.index, 0);
+
+    out = await t.req(base, `/api/v1/tests/TC-A`, {
+      method: "PATCH",
+      token,
       body: { dependsOn: ["TC-NOPE"] },
     });
     assert.equal(out.res.status, 400);

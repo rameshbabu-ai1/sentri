@@ -72,10 +72,15 @@ export function findDependencyCycle(tests) {
 /**
  * Stable topological sort for a dispatched test set.
  * @param {Object[]} tests
+ * @param {Object} [options]
+ * @param {Iterable<string>} [options.satisfiedTestIds] - Dependencies that
+ *   are intentionally outside this sort slice but run earlier (for example,
+ *   smoke tests pinned ahead of the non-smoke tail).
  * @returns {{ordered: Object[], skipped: Object[]}}
  */
-export function topologicalSortTests(tests) {
+export function topologicalSortTests(tests, options = {}) {
   if (!Array.isArray(tests) || tests.length === 0) return { ordered: [], skipped: [] };
+  const satisfiedIds = new Set(options.satisfiedTestIds || []);
 
   const cycle = findDependencyCycle(tests);
   if (cycle) {
@@ -94,7 +99,7 @@ export function topologicalSortTests(tests) {
     for (const test of tests) {
       const id = idOf(test);
       if (!id || skippedIds.has(id)) continue;
-      const missing = depsOf(test).find((depId) => !ids.has(depId) || skippedIds.has(depId));
+      const missing = depsOf(test).find((depId) => (!ids.has(depId) && !satisfiedIds.has(depId)) || skippedIds.has(depId));
       if (missing) {
         skippedIds.add(id);
         skipped.push({ ...test, status: "skipped", skipReason: "missing_upstream", missingUpstreamTestId: missing });

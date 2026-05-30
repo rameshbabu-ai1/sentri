@@ -45,6 +45,16 @@ test("topologicalSortTests preserves multi-root and isolated-node order", () => 
   assert.deepEqual(ids(ordered), ["A", "B", "C", "D"]);
 });
 
+
+test("topologicalSortTests treats satisfied upstream IDs as already run", () => {
+  const { ordered, skipped } = topologicalSortTests([
+    { id: "checkout", dependsOn: ["login-smoke"] },
+    { id: "receipt", dependsOn: ["checkout"] },
+  ], { satisfiedTestIds: ["login-smoke"] });
+  assert.deepEqual(ids(ordered), ["checkout", "receipt"]);
+  assert.deepEqual(skipped, []);
+});
+
 test("topologicalSortTests soft-skips missing upstream dependencies", () => {
   const { ordered, skipped } = topologicalSortTests([
     { id: "B", dependsOn: ["A"] },

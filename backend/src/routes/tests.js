@@ -91,7 +91,11 @@ function validateDependsOnForSave(projectId, testId, rawDependsOn) {
   if (!Array.isArray(rawDependsOn)) {
     return dependencyError(400, { code: "INVALID_DEPENDS_ON", message: "dependsOn must be an array" });
   }
-  const dependsOn = [...new Set(rawDependsOn.map((id) => String(id).trim()).filter(Boolean))];
+  const invalidIndex = rawDependsOn.findIndex((id) => typeof id !== "string" || !id.trim());
+  if (invalidIndex !== -1) {
+    return dependencyError(400, { code: "INVALID_DEPENDS_ON", index: invalidIndex, message: "dependsOn entries must be non-empty test ID strings" });
+  }
+  const dependsOn = [...new Set(rawDependsOn.map((id) => id.trim()))];
   const projectTests = testRepo.getByProjectId(projectId);
   const byId = new Map(projectTests.map((t) => [t.id, t]));
 
