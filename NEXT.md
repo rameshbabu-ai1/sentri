@@ -6,7 +6,9 @@
 
 ---
 
-> **Heads up — AUTO-023 reframed.** The legacy "LangGraph-style DAG pipeline runner" framing is **retired**. AUTO-023 is now the 5-bundle multi-agent collaboration plan in [`docs/roadmap/autonomous-multi-agent.md`](./docs/roadmap/autonomous-multi-agent.md) (envelope schema → linear handoff → reviewer↔author loop → supervisor orchestrator → tool calling). The supervisor agent (Bundle 4) is a strictly more powerful version of the DAG runner — flow control is decided by an LLM reading a structured thread, not hardcoded if/else. Migration 058's Oracle + Reviewer flags remain valid scaffolding for both framings. Bundle 1 is purely additive and parallelisable with MNT-015 — no shared files, no blocker dependency.
+> **Heads up — AUTO-023 reframed.** The legacy "LangGraph-style DAG pipeline runner" framing is **retired**. AUTO-023 is now the 5-bundle multi-agent collaboration plan in [`docs/roadmap/autonomous-multi-agent.md`](./docs/roadmap/autonomous-multi-agent.md) (envelope schema → linear handoff → reviewer↔author loop → supervisor orchestrator → tool calling). The supervisor agent (Bundle 4) is a strictly more powerful version of the DAG runner — flow control is decided by an LLM reading a structured thread, not hardcoded if/else. Migration 058's Oracle + Reviewer flags remain valid scaffolding for both framings. Bundle 1 is purely additive and parallelisable with AUTO-014 — no shared files, no blocker dependency.
+>
+> **Agent-fulfillment rule:** items requiring a live LLM API key + multi-hour human review (e.g. **AUTO-022b** eval-harness recording) are **not agent-fulfillable** and stay deferred under § ⏭ Queue → "Deferred (human-only)". Agents must skip those items and promote the next agent-completable queue slot. The "Current PR" block at the top of this file is always the next agent-completable item.
 
 ## Bundling guidance
 
@@ -14,30 +16,61 @@ Flag adjacent items as bundling candidates in your PR description rather than ex
 
 ---
 
-## ▶ Current PR — AUTO-022b — Eval harness: record real LLM cache + first real baseline
-**Effort:** M (4–8h focused maintainer session) | **Priority:** 🔴 Blocker (deferred — needs LLM API key) | **Dependencies:** AUTO-022 ✅ PR #17 plumbing, MNT-015 ✅ PR #1 (browser pool now warm, eval harness runs faster against the in-process pool) | **Source:** `ROADMAP.md` Phase 5 (AUTO-022b) + `docs/guide/eval-harness-record-goldens.md`
+## ▶ Current PR — AUTO-014 — Test dependency and execution ordering
+**Effort:** M | **Priority:** 🔵 Medium | **Dependencies:** MNT-015 ✅ PR #1 (browser pool — per-test dispatch loop already flows through `browserPool.acquire`; topological sort feeds the same loop) | **Source:** `ROADMAP.md` Phase 4 (AUTO-014). **Note:** AUTO-022b (eval-harness recording) stays in the queue but is **not agent-fulfillable** — it requires a live LLM API key + 4–8h of focused per-case recording that only a human maintainer can drive. AUTO-014 is the next agent-completable item.
 
-Activate the dormant AUTO-022 regression gate by replacing the 50 synthetic golden snapshots with real DOM captures, recording `.cache/*.txt` against the live LLM via `EVAL_RECORD=1`, and committing the first real `eval-baseline.json`. Pure data PR — no new code, no schema changes. Currently deferred per maintainer call (recording requires LLM API key + 4–8h focused per-case iteration); promoted to Current PR because MNT-015 (the prior sprint target) shipped in PR #1.
+Add explicit per-test `dependsOn: [testId, ...]` declarations so prerequisite tests (login → create record → edit record → delete record) execute in topological order. Downstream tests auto-skip when an upstream blocker fails (`skipReason: "upstream_failed"` marker, surfaced in run results + RunDetail UI). Circular declarations (`A → B → A`) are rejected at save time with a structured 400 error. Smoke-pin (AUTO-001) keeps priority over `dependsOn` — smoke tests still dispatch first; dependencies only constrain ordering *within* the non-smoke tail.
+
+**Problem:** Tests with implicit ordering dependencies (login must pass before checkout can run) currently dispatch in arbitrary order inside the `poolMap` worker pool at `backend/src/testRunner.js`. A failed login test produces cascading failures with no indication that the root cause is upstream — every dependent test reports its own `expect()` failure, the run timeline looks like 5 unrelated breakages, and `clusterFailures()` can't fingerprint the common cause. Operators waste triage time chasing symptoms instead of fixing the one broken login.
+
+**Fix:**
+1. **Schema** — new migration adds `tests.dependsOn JSON` (nullable; default `null` = no dependencies; legacy rows untouched). Migration number assigned at file-creation time per the existing sequencing.
+2. **Save-time validation** in `backend/src/routes/tests.js` rejects (a) non-array values, (b) array entries that aren't existing test IDs in the same project, (c) self-reference (`A.dependsOn` includes `A`), (d) cycles via DFS — the cycle-detection runs against the *post-save* graph so an edit that creates a cycle (`A→B` exists, edit B to add `dependsOn: [A]`) is caught at the offending write, not on the next run. 400 with structured `{ code: "CYCLE_DETECTED", path: ["A","B","A"] }` / `{ code: "MISSING_UPSTREAM", testId: "..." }`.
+3. **Runner — topological sort** in a new pure helper `backend/src/runner/dependencyOrder.js`:
+   - `topologicalSortTests(tests)` → `{ ordered, skipped }` (Kahn's algorithm, stable; `skipped[]` carries tests whose `dependsOn` references a test outside the dispatched set — soft-skipped with `skipReason: "missing_upstream"`).
+   - `computeUpstreamSkips(tests, failedTestIds)` → `Set<testId>` cascade resolver (BFS over the reverse-dep graph).
+   - Pure functions, no DB, no I/O — exercised in isolation by the new test file.
+4. **Dispatch order** in `backend/src/testRunner.js` becomes `[…smoke-pin…, …topologicallySortedNonSmoke…]`. Smoke pin happens FIRST (preserves the AUTO-001 invariant), then `topologicalSortTests` runs against the non-smoke tail. Stable sort within each group, so deterministic dispatch order is preserved for runs without `dependsOn` declarations (zero regression for legacy callers).
+5. **Skip cascade** — when a test fails, `computeUpstreamSkips` resolves every transitively-dependent test and pre-seeds them as `skipped` with `skipReason: "upstream_failed"` + `upstreamFailedTestId: <root>` BEFORE the dependent slot would dispatch. Same shape as AUTO-001's `over_budget` / AUTO-004's `skipped_no_impact`, so `evaluateQualityGates` already excludes these from the pass-rate denominator via `isNonExecutedSkip()`.
+6. **UI** — `frontend/src/pages/TestDetail.jsx` gains a "Depends on" multi-select sourced from `useProjectTestsQuery`, with inline validation against the same cycle detector (shared `frontend/src/utils/dependencyGraph.js` — parity with the backend implementation). RunDetail surfaces upstream-failed rows with a 🔗 badge linking to the blocking test.
 
 **Files to change:**
-- `backend/tests/fixtures/eval-goldens/*.json` — replace 50 synthetic snapshots with real DOM captures from production / staging targets
-- `.cache/*.txt` — record LLM responses keyed on `sha256(promptVersion + model + snapshot + url)` via `EVAL_RECORD=1`
-- `eval-baseline.json` — commit the first real baseline so the regression gate stops being dormant
-- `docs/guide/eval-harness-record-goldens.md` — strike the "dormant until AUTO-022b" warning once the gate is live
+- `backend/src/database/migrations/NNN_test_depends_on.sql` (new) — adds `tests.dependsOn JSON`
+- `backend/src/database/repositories/testRepo.js` — `dependsOn` in the column allowlist + `LEAN_COLS` + JSON parse on read
+- `backend/src/routes/tests.js` — save-time validation (non-array, missing-id, self-ref, cycle); 400 with structured codes
+- `backend/src/runner/dependencyOrder.js` (new) — `topologicalSortTests(tests)` + `computeUpstreamSkips(tests, failedTestIds)`
+- `backend/src/testRunner.js` — call `topologicalSortTests` after smoke-pin; wire `computeUpstreamSkips` into the failure path so dependents pre-seed as `skipped` before dispatch
+- `backend/src/utils/skipReasons.js` — register `"upstream_failed"` + `"missing_upstream"` as non-executed skips (so `evaluateQualityGates` excludes them from the denominator)
+- `frontend/src/utils/dependencyGraph.js` (new) — shared cycle detector for the Settings UI
+- `frontend/src/pages/TestDetail.jsx` — "Depends on" multi-select with inline cycle validation
+- `frontend/src/pages/RunDetail.jsx` — render the 🔗 upstream-failed badge with link to the blocking test
+- `frontend/src/api.js` — `updateTest({ dependsOn })` helper if not already present
+- `backend/tests/dependency-order.test.js` (new) — topological sort (linear chain, diamond, multi-root, isolated nodes), cycle detection (self-ref, 2-node, 3-node, deep), `computeUpstreamSkips` cascade (single root, multi-root, partial failure)
+- `backend/tests/test-routes-depends-on.test.js` (new) — POST/PATCH validation: non-array → 400, missing-id → 400, self-ref → 400, cycle → 400, valid graph → 200; cross-workspace ACL preserved
+- `backend/tests/run-tests.js` — register the two new test files
+- `frontend/tests/dependency-graph.test.js` (new) — cycle detector parity with the backend implementation
+- `docs/changelog.md` — `## [Unreleased]` § Added entry
+- `docs/api/tests.md` — document the `dependsOn` field on POST/PATCH/GET shapes
+- `QA.md` — new "Test dependency ordering (AUTO-014)" section with manual test plan
 
 **Acceptance criteria:**
-- `node backend/scripts/run-eval.mjs` completes against the recorded cache without an LLM API key configured.
-- `eval-baseline.json` carries non-synthetic scores; the CI `Eval — Golden-set regression check` job stays green.
-- `docs/guide/eval-harness-record-goldens.md` no longer carries the "dormant" warning.
+- A login → checkout test chain runs in declared order regardless of `tests[]` array order at the route layer.
+- A failed login test pre-seeds every dependent test as `skipped { skipReason: "upstream_failed", upstreamFailedTestId }` BEFORE the dependent slot dispatches (verified by asserting zero `executeTest` invocations for the skipped tests).
+- Saving a cycle (`A→B→A`) returns 400 with `{ code: "CYCLE_DETECTED", path: ["A","B","A"] }`; the test row is not mutated.
+- `evaluateQualityGates` excludes `upstream_failed` + `missing_upstream` skips from the pass-rate denominator — a 5-test run where 1 login fails + 4 dependents skip reports `passRate: 0/1`, not `0/5`.
+- Smoke-pin invariant preserved — `isSmokeTest(t)` tests still dispatch first; `dependsOn` only constrains ordering within the non-smoke tail.
 
-### PR checklist (AUTO-022b)
-- [ ] PR title follows Conventional Commits (`chore(eval): AUTO-022b — record real LLM cache + first real baseline`)
+### PR checklist (AUTO-014)
+- [ ] PR title follows Conventional Commits (`feat(runner): AUTO-014 — test dependency + execution ordering`)
 - [ ] Branch is off `develop`, not `main`
-- [ ] `cd backend && npm test` passes locally
-- [ ] `node backend/scripts/run-eval.mjs` passes against the recorded cache (no live LLM key needed)
-- [ ] `eval-baseline.json` committed under `backend/tests/fixtures/`
-- [ ] `docs/guide/eval-harness-record-goldens.md` updated — "dormant" warning struck
-- [ ] ROADMAP.md `### AUTO-022b` row flipped to `**Status:** ✅ Complete (PR #N)`
+- [ ] `cd backend && npm test` passes locally (incl. new `dependency-order.test.js` + `test-routes-depends-on.test.js`)
+- [ ] `cd frontend && npm run build && npm test` passes locally (incl. new `dependency-graph.test.js`)
+- [ ] Migration applies cleanly on both SQLite + PostgreSQL (`tests.dependsOn JSON`)
+- [ ] Cycle-detection rejects `A→B→A` and `A→A` at save time with `{ code: "CYCLE_DETECTED" }`
+- [ ] Failed upstream test pre-seeds all transitive dependents as `skipped` BEFORE dispatch (no `executeTest` calls)
+- [ ] `docs/changelog.md` updated under `## [Unreleased]` § Added
+- [ ] `QA.md` § "Test dependency ordering (AUTO-014)" landed
+- [ ] ROADMAP.md `### AUTO-014` section flipped to `**Status:** ✅ Complete (PR #N)` and Completed Work Summary row added
 
 <details>
 <summary>Archived: previous Current PR — MNT-015 — Browser pool reuse + per-tenant AI rate limiting (✅ shipped in PR #1)</summary>
@@ -105,24 +138,24 @@ Replace the cold-start-per-test Chromium launch pattern in `backend/src/testRunn
 ---
 ## ⏭ Queue
 
-> **Heads up:** **AUTO-022b** is the current target (promoted from queue slot 2 after MNT-015 shipped in PR #1). Remaining queue order: **AUTO-023** (multi-agent collaboration — 5-bundle plan, parallel-safe with AUTO-022b) → **AUTO-014** (test dependency + execution ordering) → **DIF-008** (Jira / Linear issue sync). AUTO-023's legacy DAG-runner framing is retired; the supervisor orchestrator (Bundle 4) supersedes it. Original "AI platform foundation" track (AI-002 → AI-007) is fully shipped — see `ROADMAP.md` § Phase 5.
+> **Heads up:** **AUTO-014** is the current target (promoted from queue slot 3 after MNT-015 shipped in PR #1 — AUTO-022b stays deferred because it isn't agent-fulfillable). Remaining queue order: **AUTO-023** (multi-agent collaboration — 5-bundle plan, parallel-safe with AUTO-014) → **DIF-008** (Jira / Linear issue sync) → **SEC-005** (SAML / OIDC SSO federation). **AUTO-022b** stays as a deferred 🔴 Blocker that requires a human maintainer with an LLM API key — agents must skip it and pick the next agent-completable item. AUTO-023's legacy DAG-runner framing is retired; the supervisor orchestrator (Bundle 4) supersedes it. Original "AI platform foundation" track (AI-002 → AI-007) is fully shipped — see `ROADMAP.md` § Phase 5.
 
 ### 1 · AUTO-023 — Autonomous multi-agent collaboration (5 bundles)
-**Effort:** XL (split across 5 bundles, each independently shippable) | **Priority:** 🟢 Strategic | **Dependencies:** INF-007 ✅ (OTel spans), `agent_events` ✅ (Task 2), `provider_routes` + `quotaGuard` + circuit breaker ✅ (PR #23), migration 058 ✅ (Oracle + Reviewer per-project flags), AI-005c single-agent collapse rule ✅. **Not blocked on AUTO-022b.** | **Source:** [`docs/roadmap/autonomous-multi-agent.md`](./docs/roadmap/autonomous-multi-agent.md) (full plan, schema, exit criteria per bundle, cross-bundle invariants, risk register).
+**Effort:** XL (split across 5 bundles, each independently shippable) | **Priority:** 🟢 Strategic | **Dependencies:** INF-007 ✅ (OTel spans), `agent_events` ✅ (Task 2), `provider_routes` + `quotaGuard` + circuit breaker ✅ (PR #23), migration 058 ✅ (Oracle + Reviewer per-project flags), AI-005c single-agent collapse rule ✅. **Not blocked on AUTO-014.** | **Source:** [`docs/roadmap/autonomous-multi-agent.md`](./docs/roadmap/autonomous-multi-agent.md) (full plan, schema, exit criteria per bundle, cross-bundle invariants, risk register).
 
 Replaces the legacy DAG-runner framing. The new plan ships a real multi-agent system in 5 independently-shippable bundles: **B1** `agent_messages` schema + envelope validator + emitter (purely additive, zero behaviour change), **B2** wrap each pipeline call site with envelope read/write (still linear DAG, gated by `SENTRI_AGENT_MODE=envelope`), **B3** reviewer↔author feedback loop with structured `verdict ∈ {accept, revise, reject}` + bounded `MAX_REVIEW_ROUNDS`, **B4** supervisor orchestrator that reads the thread and decides next role (`SENTRI_AGENT_MODE=autonomous`, per-workspace opt-in), **B5** thread blackboard + closed-set tool registry (`db.listExistingTests`, `playwright.dryRun`, `thread.askPeer`). Every bundle preserves zero-regression default (`SENTRI_AGENT_MODE=pipeline` = today's behaviour). The supervisor (B4) supersedes the DAG runner — flow control is LLM-driven, not hardcoded if/else.
 
-### 2 · AUTO-014 — Test dependency and execution ordering
-**Effort:** M | **Priority:** 🔵 Medium | **Dependencies:** none | **Source:** `ROADMAP.md` Phase 4 (AUTO-014)
-Add explicit per-test `dependsOn: [testId, ...]` declarations so prerequisite tests (login → create record → edit record → delete record) execute in topological order, downstream tests auto-skip when an upstream blocker fails (`skipReason: "upstream_failed"` marker), and circular-dependency declarations are rejected at save time.
-
-### 3 · DIF-008 — Jira / Linear issue sync
+### 2 · DIF-008 — Jira / Linear issue sync
 **Effort:** L | **Priority:** 🟢 Differentiator | **Dependencies:** FEA-001 ✅ (notification dispatch pattern) | **Source:** `ROADMAP.md` Phase 3 (DIF-008)
 Add `POST /api/integrations/jira` and `POST /api/integrations/linear` settings endpoints to store OAuth tokens; on test-run failure auto-create a bug ticket (screenshot + error + Playwright trace attached); sync pass/fail status back to the linked issue's status field.
 
-### 4 · SEC-005 — SAML / OIDC SSO federation
+### 3 · SEC-005 — SAML / OIDC SSO federation
 **Effort:** L | **Priority:** 🟢 Strategic | **Dependencies:** ACL-001 ✅ (workspaces required for per-workspace SSO) | **Source:** `ROADMAP.md` Phase 2 (SEC-005)
 Integrate `openid-client` for OIDC and `@node-saml/passport-saml` for SAML 2.0 so enterprise procurement teams can connect Okta / Azure AD / OneLogin / Ping. Per-workspace SSO config (metadata URL, client ID, certificate); auto-provision users on first SSO login; Settings → Authentication panel.
+
+### Deferred (human-only) · AUTO-022b — Eval harness: record real LLM cache + first real baseline
+**Effort:** M (4–8h focused maintainer session) | **Priority:** 🔴 Blocker (deferred — needs LLM API key, **not agent-fulfillable**) | **Dependencies:** AUTO-022 ✅ PR #17 plumbing | **Source:** `ROADMAP.md` Phase 5 (AUTO-022b) + `docs/guide/eval-harness-record-goldens.md`
+Activate the dormant AUTO-022 regression gate by replacing the 50 synthetic golden snapshots with real DOM captures, recording `.cache/*.txt` against the live LLM via `EVAL_RECORD=1`, and committing the first real `eval-baseline.json`. Pure data PR — no new code, no schema changes. **Agents skip this item** — recording requires a live LLM API key and per-case human review of the captured prompts/responses; it cannot be driven end-to-end by an autonomous agent.
 
 <!-- LEGACY INF-009 PROSE BELOW — kept inert until human prunes; superseded by MNT-015 above -->
 <!--
@@ -181,12 +214,11 @@ Integrate `openid-client` for OIDC and `@node-saml/passport-saml` for SAML 2.0 s
 
 ## 🔀 Parallel opportunities
 
-Items that do not overlap AUTO-022b's changed files and can land in a separate PR while it is in flight. AUTO-022b touches `backend/tests/fixtures/eval-goldens/*.json` + `.cache/*.txt` + `eval-baseline.json` + `docs/guide/eval-harness-record-goldens.md` only — a pure data + docs PR with no code-path overlap. Anything below is safe to land in parallel.
+Items that do not overlap AUTO-014's changed files and can land in a separate PR while it is in flight. AUTO-014 touches `backend/src/database/migrations/NNN_test_depends_on.sql` (new), `backend/src/database/repositories/testRepo.js`, `backend/src/routes/tests.js`, `backend/src/runner/dependencyOrder.js` (new), `backend/src/testRunner.js` (dispatch order + skip cascade), `backend/src/utils/skipReasons.js`, `frontend/src/utils/dependencyGraph.js` (new), `frontend/src/pages/TestDetail.jsx`, `frontend/src/pages/RunDetail.jsx`. Any PR touching the per-test dispatch order, `testRepo` column list, or the test-detail / run-detail UI will conflict and should serialise.
 
 | ID | Title | Effort | Priority | Shared files? |
 |----|-------|--------|----------|---------------|
 | AUTO-023 Bundle 1 | Multi-agent envelope schema + validator + emitter | M | 🟢 Strategic | None — purely additive `agent_messages` schema + emitter. |
-| AUTO-014 | Test dependency and execution ordering | M | 🔵 Medium | None — `routes/tests.js`, `testRunner.js` topological sort, new schema column |
 | DIF-008 | Jira / Linear issue sync | L | 🟢 Differentiator | None — `routes/settings.js`, `Settings.jsx`, new `utils/integrations.js` |
 | SEC-005 | SAML / OIDC SSO federation | L | 🟢 Strategic | None — `routes/auth.js`, `middleware/authenticate.js`, `Settings.jsx` (different tab) |
 
