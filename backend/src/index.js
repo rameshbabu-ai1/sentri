@@ -48,6 +48,7 @@ import { closeQueue } from "./queue.js";
 import { startWorker, stopWorker } from "./workers/runWorker.js";
 import { browserPool } from "./runner/browserPool.js";
 import { aiRateLimit } from "./middleware/aiRateLimit.js";
+import { drain as drainDbWriteQueue } from "./utils/dbWriteQueue.js";
 
 // ─── App + global middleware ──────────────────────────────────────────────────
 import { app, serveIndexWithNonce } from "./middleware/appSetup.js";
@@ -236,7 +237,18 @@ async function gracefulShutdown(signal) {
     // 7. Close Redis connections (INF-002)
     await closeRedis();
 
-    // 8. Close database cleanly (WAL checkpoint for SQLite, pool drain for PostgreSQL)
+    // 8. Flush pending batched writes (B1.2) before closing the DB so no
+    //    queued INSERT/UPDATE is lost when the WAL checkpoint runs.
+    try {
+      const flushed = drainDbWriteQueue();
+      if (flushed > 0) {
+        console.log(formatLogLine("info", null, `[shutdown] Drained ${flushed} batched write(s)`));
+      }
+    } catch (err) {
+      console.warn(formatLogLine("warn", null, `[shutdown] dbWriteQueue.drain failed: ${err?.message || err}`));
+    }
+
+    // 9. Close database cleanly (WAL checkpoint for SQLite, pool drain for PostgreSQL)
     await closeDatabase();
     console.log(formatLogLine("info", null, "[shutdown] Graceful shutdown complete"));
     process.exit(0);
