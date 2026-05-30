@@ -9,17 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **B1.1 (AUDIT-ROADMAP)** — New `run_test_results` append-only table (migration `065`) flushes per-test outcomes durably (synchronous BEGIN/COMMIT via `dbWriteQueue` `"durable"` mode) so SIGKILL / OOM mid-run loses zero results, matching GitHub Actions / CircleCI / AWS Step Functions crash-recovery semantics.
-- **B1.1 (AUDIT-ROADMAP)** — `ON DELETE CASCADE` on `run_test_results.runId` mirrors `run_logs` for SOC 2 CC8.1 audit-trail integrity on parent-run purge.
-- **B1.1 (AUDIT-ROADMAP)** — Duplicate-write observability: `runTestResultRepo.append()` bumps `app_run_test_result_duplicates_total{reason}` and emits a structured warn log on `duplicate_dispatch` hits, so silent drops are alertable.
-- **B1.2 (AUDIT-ROADMAP)** — Tiered-durability write queue (`utils/dbWriteQueue.js`): `"batched"` mode (<1 ms enqueue, may lose one batch on SIGKILL) and `"durable"` mode (synchronous commit, lose-nothing). Tuneable via `DB_WRITE_BATCH_SIZE` / `DB_WRITE_FLUSH_MS`; PostgreSQL is a passthrough.
-- **B1.2 (AUDIT-ROADMAP)** — Industry-standard tiered-durability pattern matches Postgres `synchronous_commit`, Kafka `acks`, MySQL `sync_binlog`. Graceful-shutdown drain in `index.js` flushes pending writes before `closeDatabase()`.
-- **B1.3 (AUDIT-ROADMAP)** — New `crawl_snapshots` table (migration `066`) streams snapshots to disk as each page finishes, with a `loadMs` column the upcoming Bundle 2 adaptive-timeout work consumes. `ON DELETE CASCADE` on `runId`.
-- **B1.3 (AUDIT-ROADMAP)** — `crawlBrowser.js` and `stateExplorer.js` persist each crawled page via `crawlSnapshotRepo.save()` immediately. Legacy in-memory `snapshots[]` accumulation kept as a shadow path during the B1 → B2 transition.
-- **B1 (AUDIT-ROADMAP)** — New `runs.failureReason` and `runs.reviewRejectedTests` columns (migration `067`) attribute process-crash vs ordinary failure. `markOrphansInterrupted` stamps `failureReason='process_crash'` so resume + audit consumers can distinguish SIGKILL from user abort.
-- **B1 (AUDIT-ROADMAP)** — `POST /api/v1/runs/:runId/resume` (admin-only) re-dispatches only tests missing from `run_test_results`, so operators pick up where the crash left off instead of restarting. Mirrors GitHub Actions `re-run failed jobs`.
-- **B1 (AUDIT-ROADMAP)** — RunDetail surfaces a `Resume` button + an `Interrupted` badge for crash-recovered runs; new `api.resumeRun()` helper in `frontend/src/api.js`.
-- **B1 (AUDIT-ROADMAP)** — Four new Prometheus metrics: `app_db_write_queue_depth` (Gauge), `app_db_write_batch_duration_seconds` (Histogram), `app_db_write_batch_size` (Histogram), `app_run_test_result_duplicates_total{reason}` (Counter).
+- **B1** — Per-test results are now persisted durably as each test finishes, so a server crash or OOM mid-run preserves every result already collected instead of losing the entire run.
+- **B1** — Crash-recovered runs surface in the UI with an Interrupted badge and a new admin-only Resume button that re-dispatches only the tests that didn't finish — operators no longer have to restart from zero after a server crash.
+- **B1** — Large crawls stream snapshots to disk as each page completes, dropping peak memory enough to crawl significantly larger sites on the same container without OOM kills.
+- **B1** — SQLite write throughput improved under high parallelism via a write-batching queue, with tuneable batch size and flush interval (`DB_WRITE_BATCH_SIZE`, `DB_WRITE_FLUSH_MS`); PostgreSQL deployments are unaffected.
+- **B1** — Server startup now distinguishes runs ended by a process crash from user-aborted runs, so the UI and audit log show an honest reason instead of generic "interrupted".
+- **B1** — Four new Prometheus metrics expose write-queue depth, batch latency, batch size, and duplicate-write rate for crash-recovery observability.
 - **MNT-015** — Warm Playwright browser-process pool with per-`browserType` FIFO waiter queue and `BROWSER_POOL_SIZE` env knob (default `max(PARALLEL_WORKERS, MAX_WORKERS, WORKER_CONCURRENCY, 2)`).
 - **MNT-015** — Per-workspace cost-weighted AI rate limiter (AI mutations = 10 units, regular calls = 1) on `POST /chat`, `/projects/:id/crawl`, `/projects/:id/tests/generate`, `/tests/:testId/fix`, `/settings/agent-roles/:role/test`.
 - **MNT-015** — IETF-standard `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` response headers on every AI route + `Retry-After` on 429s, so clients can back off proactively (matches GitHub / Stripe / OpenAI convention).

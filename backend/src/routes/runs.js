@@ -802,6 +802,20 @@ router.post("/runs/:runId/resume", requireRole("admin"), expensiveOpLimiter, asy
   };
   runRepo.create(newRun);
 
+  // Mark the original run as resumed so the gate at line 687 (status check +
+  // failureReason='process_crash') rejects subsequent resume attempts. Without
+  // this, RUN-1 stays `interrupted`+`process_crash` after RUN-2 is dispatched,
+  // and a second `POST /runs/RUN-1/resume` call would re-dispatch the exact
+  // same "remaining" testQueue slice — `getCompletedTestIds(RUN-1)` only sees
+  // RUN-1's own `run_test_results` rows; RUN-2's results live under RUN-2's
+  // id, so the remaining set is unchanged. The duplicate dispatch can create
+  // duplicate records / send duplicate emails / charge duplicate payments on
+  // the target application under test. Setting `failureReason='resumed'`
+  // changes the != 'process_crash' check at line 687 to reject and also
+  // documents in the DB that this run was successfully resumed (correlate
+  // with the matching activity log row via `meta.resumedFromRunId`).
+  runRepo.update(req.params.runId, { failureReason: "resumed" });
+
   logActivity({ ...actor(req),
     type: "test_run.resume", projectId: project.id, projectName: project.name,
     runId: newRunId,
