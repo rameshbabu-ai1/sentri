@@ -9,12 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **B1** — Per-test results are now persisted durably as each test finishes, so a server crash or OOM mid-run preserves every result already collected instead of losing the entire run.
-- **B1** — Crash-recovered runs surface in the UI with an Interrupted badge and a new admin-only Resume button that re-dispatches only the tests that didn't finish — operators no longer have to restart from zero after a server crash.
-- **B1** — Large crawls stream snapshots to disk as each page completes, dropping peak memory enough to crawl significantly larger sites on the same container without OOM kills.
-- **B1** — SQLite write throughput improved under high parallelism via a write-batching queue, with tuneable batch size and flush interval (`DB_WRITE_BATCH_SIZE`, `DB_WRITE_FLUSH_MS`); PostgreSQL deployments are unaffected.
-- **B1** — Server startup now distinguishes runs ended by a process crash from user-aborted runs, so the UI and audit log show an honest reason instead of generic "interrupted".
-- **B1** — Four new Prometheus metrics expose write-queue depth, batch latency, batch size, and duplicate-write rate for crash-recovery observability.
+- **B1** — Test results survive a server crash or OOM kill mid-run, so a 500-test suite that dies at test 490 no longer loses everything.
+- **B1** — Crash-recovered runs surface in the UI with an Interrupted badge and an admin-only Resume button that re-runs only the tests that didn't finish.
+- **B1** — Large crawls now use far less memory, so operators can crawl significantly larger sites on the same container without OOM kills.
+- **B1** — SQLite write throughput improved under high parallelism; tuneable via `DB_WRITE_BATCH_SIZE` and `DB_WRITE_FLUSH_MS`. PostgreSQL deployments are unaffected.
+- **B1** — Runs ended by a process crash are now labelled as such in the UI and audit log instead of the generic "interrupted".
 - **MNT-015** — Warm Playwright browser-process pool with per-`browserType` FIFO waiter queue and `BROWSER_POOL_SIZE` env knob (default `max(PARALLEL_WORKERS, MAX_WORKERS, WORKER_CONCURRENCY, 2)`).
 - **MNT-015** — Per-workspace cost-weighted AI rate limiter (AI mutations = 10 units, regular calls = 1) on `POST /chat`, `/projects/:id/crawl`, `/projects/:id/tests/generate`, `/tests/:testId/fix`, `/settings/agent-roles/:role/test`.
 - **MNT-015** — IETF-standard `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` response headers on every AI route + `Retry-After` on 429s, so clients can back off proactively (matches GitHub / Stripe / OpenAI convention).
