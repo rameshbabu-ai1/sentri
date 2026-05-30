@@ -45,7 +45,9 @@ import { classifyError } from "./utils/errorClassifier.js";
 import { structuredLog, formatLogLine } from "./utils/logFormatter.js";
 import * as testRepo from "./database/repositories/testRepo.js";
 import * as runRepo from "./database/repositories/runRepo.js";
+import * as runTestResultRepo from "./database/repositories/runTestResultRepo.js";
 import * as testFixtureRepo from "./database/repositories/testFixtureRepo.js";
+import { enqueue as enqueueDbWrite } from "./utils/dbWriteQueue.js";
 import { signRunArtifacts, signArtifactUrl } from "./middleware/appSetup.js";
 import { writeArtifactBuffer } from "./utils/objectStorage.js";
 import fs from "fs";
@@ -713,6 +715,43 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
       // synchronous (~1ms) so this adds negligible overhead per test.
       runRepo.save(run);
     }
+
+    // B1.1 (AUDIT-ROADMAP Bundle 1) — append-only mirror write to
+    // `run_test_results`. The legacy paths above already flush results
+    // every test, but they rewrite (single-shard) or splice into
+    // (shard-mode) the parent run's JSON `results[]` column. The new
+    // append-only row is what `POST /runs/:id/resume` consults via
+    // `runTestResultRepo.getCompletedTestIds(runId)` to skip
+    // already-executed tests after a process crash. Routed through
+    // `dbWriteQueue` so 50 results in a parallel-workers run collapse
+    // into ~one transaction instead of 50. The shutdown hook in
+    // `index.js` drains the queue before `closeDatabase()` so
+    // graceful-shutdown loses nothing; ungraceful crashes lose at most
+    // the last batch (≤ DB_WRITE_BATCH_SIZE rows, ≤ DB_WRITE_FLUSH_MS
+    // old) — strictly better than the pre-B1.1 contract where the same
+    // crash window dropped the legacy save too.
+    enqueueDbWrite(() => {
+      runTestResultRepo.append(run.id, {
+        testId: test.id,
+        status: result.status,
+        error: result.error || null,
+        errorCategory: result.errorCategory || null,
+        duration: Number.isFinite(result.durationMs) ? result.durationMs : null,
+        retryCount: result.retryCount || 0,
+        iterationIndex: Number.isInteger(result.iterationIndex) ? result.iterationIndex : 0,
+        // Lean artifact projection — only the paths the resume endpoint
+        // and CI consumers need. Skip screenshot / video buffers (heavy)
+        // and webVitals / coverage payloads (rehydrated from legacy
+        // `runs.results` until the follow-up flips `getById` to the new
+        // source).
+        artifacts: {
+          screenshotPath: result.screenshotPath || null,
+          videoPath: result.videoPath || null,
+          tracePath: result.tracePath || null,
+        },
+        healingEvents: Array.isArray(result.healingEvents) ? result.healingEvents : null,
+      });
+    });
 
     // Broadcast a snapshot after each result so the frontend progress bar
     // updates in real time (especially important during parallel execution

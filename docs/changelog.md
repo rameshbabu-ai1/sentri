@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **B1.1 (AUDIT-ROADMAP)** — New `run_test_results` append-only table flushes per-test outcomes the moment they complete (migration `062`), so a SIGKILL / OOM / container kill mid-run preserves every result collected up to that point instead of dropping the in-memory `run.results[]`.
+- **B1.2 (AUDIT-ROADMAP)** — Write-batching queue (`utils/dbWriteQueue.js`) collapses high-frequency SQLite writes (`run_test_results`, healing, logs) into single transactions, lifting effective throughput under `parallelWorkers > 1`. Tuneable via `DB_WRITE_BATCH_SIZE` (default 50) and `DB_WRITE_FLUSH_MS` (default 100). PostgreSQL deployments are a passthrough.
+- **B1.3 (AUDIT-ROADMAP)** — New `crawl_snapshots` table (migration `063`) lets the crawler stream snapshots to disk as each page finishes instead of accumulating them in heap, with a `loadMs` column the upcoming Bundle 2 adaptive-timeout work consumes.
+- **B1 (AUDIT-ROADMAP)** — New `runs.failureReason` and `runs.reviewRejectedTests` columns (migration `064`) capture process-crash vs ordinary failure attribution and feed the upcoming `POST /runs/:id/resume` endpoint.
+- **B1 (AUDIT-ROADMAP)** — Three new Prometheus metrics for the write queue: `app_db_write_queue_depth` (Gauge), `app_db_write_batch_duration_seconds` (Histogram), `app_db_write_batch_size` (Histogram).
 - **MNT-015** — Warm Playwright browser-process pool with per-`browserType` FIFO waiter queue and `BROWSER_POOL_SIZE` env knob (default `max(PARALLEL_WORKERS, MAX_WORKERS, WORKER_CONCURRENCY, 2)`).
 - **MNT-015** — Per-workspace cost-weighted AI rate limiter (AI mutations = 10 units, regular calls = 1) on `POST /chat`, `/projects/:id/crawl`, `/projects/:id/tests/generate`, `/tests/:testId/fix`, `/settings/agent-roles/:role/test`.
 - **MNT-015** — IETF-standard `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` response headers on every AI route + `Retry-After` on 429s, so clients can back off proactively (matches GitHub / Stripe / OpenAI convention).
