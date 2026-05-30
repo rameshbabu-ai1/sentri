@@ -428,7 +428,35 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
   const smokeTests = tests.filter((t) => isSmokeTest(t));
   const nonSmokeTests = tests.filter((t) => !isSmokeTest(t));
   const smokeTestIds = smokeTests.map((t) => t.id).filter(Boolean);
-  const { ordered: orderedNonSmokeTests, skipped: missingDependencySkipped } = topologicalSortTests(nonSmokeTests, { satisfiedTestIds: smokeTestIds });
+  // AUTO-014: `topologicalSortTests` throws `CYCLE_DETECTED` if any cycle
+  // slips past route-level validation (`validateDependsOnForSave` in
+  // `routes/tests.js`). The runner is the second line of defense — direct
+  // DB writes, replication lag between API replicas, or a future caller
+  // that bypasses the validator could land a cyclic graph here. Catching
+  // it surfaces a structured run failure with `errorCategory: "config"`
+  // instead of an uncaught throw that bubbles into the BullMQ worker as
+  // an opaque crash with no run row update.
+  let orderedNonSmokeTests;
+  let missingDependencySkipped;
+  try {
+    ({ ordered: orderedNonSmokeTests, skipped: missingDependencySkipped } = topologicalSortTests(nonSmokeTests, { satisfiedTestIds: smokeTestIds }));
+  } catch (err) {
+    if (err?.code === "CYCLE_DETECTED") {
+      const cyclePath = Array.isArray(err.path) ? err.path.join(" → ") : "";
+      const message = `Dependency cycle detected${cyclePath ? `: ${cyclePath}` : ""}`;
+      run.status = "failed";
+      run.error = message;
+      run.errorCategory = "config";
+      run.finishedAt = new Date().toISOString();
+      run.shardsCompleted = Math.max(1, Number(run.shardCount) || 1);
+      logError(run, message);
+      structuredLog("run.dependency_cycle", { runId, path: err.path || [] });
+      runRepo.save(run);
+      emitRunEvent(run.id, "done", { status: "failed", error: message });
+      return;
+    }
+    throw err;
+  }
   tests = [
     ...smokeTests,
     ...orderedNonSmokeTests,

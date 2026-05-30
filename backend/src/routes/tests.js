@@ -511,7 +511,13 @@ router.post("/projects/:id/tests", requireRole("qa_lead"), (req, res) => {
     modelUsed: null,
     linkedIssueKey: null,
     tags: [],
-    dependsOn: dependencyValidation?.dependsOn ?? undefined,
+    // AUTO-014: legacy rows store `null` when no dependencies are declared
+    // (`docs/api/tests.md` documents `null` for "tests with no dependency
+    // declaration"). New tests created without a `dependsOn` body field
+    // must match that contract — passing `undefined` here would let the
+    // repo's `fillDefaults` coerce it to `[]`, drifting the persisted shape
+    // for new vs. legacy rows.
+    dependsOn: dependencyValidation?.dependsOn ?? null,
     workspaceId: project.workspaceId || null,
   };
 
