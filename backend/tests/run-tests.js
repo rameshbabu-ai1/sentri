@@ -319,8 +319,17 @@ const files = [
   // shouldEnumerateFrame (iframe strategy gate), and
   // getSelfHealingHelperCode's adaptive-timeout injection into the vm
   // sandbox helper string. Browser-level enumeration + hydration are
-  // covered by QA.md § "iframe + SPA hydration (B2)".
+  // covered by `b2-iframe-crawl.test.js` (E2E against a local fixture
+  // server) and the operator runbook at `QA.md § "iframe + SPA hydration
+  // + adaptive timeout (AUDIT-ROADMAP B2)"`.
   "tests/b2-adaptive-timeout.test.js",
+  // B2 — E2E iframe enumeration against a real Chromium browser pointed
+  // at a local same-origin HTTP fixture (the only way to exercise the
+  // browser's same-origin policy: `data:` URLs each have their own
+  // opaque origin). Pinned the 5 acceptance criteria from the spec at
+  // `docs/roadmap/AUDIT-ROADMAP.md:425-441`. Degrades gracefully when
+  // Chromium binaries aren't installed (CI cross-browser job only).
+  "tests/b2-iframe-crawl.test.js",
   "tests/run-worker-shard-retry.test.js",
   "tests/run-abort-pubsub.test.js",
   "tests/run-shard-crash.test.js",
