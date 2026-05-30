@@ -879,6 +879,16 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
   }
 
   for (const skippedTest of missingDependencySkipped) {
+    // AUTO-014 + CAP-002 Phase 2: in shard mode, stamp the worker's
+    // `shardIndex` on missing-upstream skips before `recordSkipResult`
+    // reads `test._shardIndex`. Without this, the topo-sort-skipped tests
+    // (returned by `topologicalSortTests` BEFORE the shard-stamp loop at
+    // `:467` runs over the reassigned `tests` array) inherit the default
+    // `0` — and `runWorker.js`'s retry-reset filters results by
+    // `_shardIndex`. A skip attributed to shard 0 would survive a retry
+    // of the actual owning shard, producing stale duplicate rows after
+    // the retried shard re-produces the same skip.
+    if (isShardMode && skippedTest._shardIndex == null) skippedTest._shardIndex = shardIndex;
     recordSkipResult(skippedTest, "missing_upstream", {
       missingUpstreamTestId: skippedTest.missingUpstreamTestId || null,
     });
