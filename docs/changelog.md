@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **MNT-015** — Added a warm Playwright browser-context pool with pool telemetry (`app_browser_pool_*`) and graceful shutdown draining.
+- **MNT-015** — Added a warm Playwright browser pool with pool telemetry (`app_browser_pool_*`) and graceful shutdown draining.
 - **MNT-015** — Added per-workspace, cost-weighted AI route limiting with `Retry-After` responses and `app_ai_rate_limited_total` telemetry.
 
 ### Performance

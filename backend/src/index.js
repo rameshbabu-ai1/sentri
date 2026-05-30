@@ -326,7 +326,7 @@ const aiMutationPaths = [
   "/projects/:id/crawl",
   "/projects/:id/tests/generate",
   "/tests/:testId/fix",
-  "/tests/:testId/apply-fix",
+  "/settings/agent-roles/:role/test",
 ];
 for (const routePath of aiMutationPaths) {
   app.post(`${API_PREFIX}${routePath}`, requireAuth, workspaceScope, aiMutationLimiter);

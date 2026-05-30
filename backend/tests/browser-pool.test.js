@@ -9,35 +9,39 @@ import { BrowserPool } from "../src/runner/browserPool.js";
 function createFakeLauncher() {
   let launches = 0;
   const contexts = [];
+  const browsers = [];
   return {
     get launches() { return launches; },
     contexts,
+    browsers,
     async launch() {
       launches += 1;
-      return {
-        isConnected: () => true,
+      const browser = {
+        closed: false,
+        isConnected: () => !browser.closed,
         async newContext(options) {
           const pages = [];
           const context = {
             options,
             closed: false,
-            clearedCookies: 0,
-            clearedPermissions: 0,
             pages: () => pages,
             async newPage() {
               const page = { closed: false, async close() { this.closed = true; } };
               pages.push(page);
               return page;
             },
-            async clearCookies() { this.clearedCookies += 1; },
-            async clearPermissions() { this.clearedPermissions += 1; },
-            async close() { this.closed = true; },
+            async close() {
+              this.closed = true;
+              for (const page of pages) page.closed = true;
+            },
           };
           contexts.push(context);
           return context;
         },
         async close() { this.closed = true; },
       };
+      browsers.push(browser);
+      return browser;
     },
   };
 }
@@ -50,17 +54,29 @@ async function main() {
     catch (err) { failed++; console.log(`  ❌  ${name}\n      ${err.stack || err.message}`); }
   }
 
-  await run("reuses released contexts and launches once", async () => {
+  await run("reuses the browser process while isolating contexts", async () => {
     const fake = createFakeLauncher();
     const pool = new BrowserPool({ size: 2, launcher: fake.launch });
     const first = await pool.acquire({ browserType: "chromium", contextOptions: { locale: "en-US" } });
     await first.release();
     const second = await pool.acquire({ browserType: "chromium", contextOptions: { locale: "en-US" } });
     assert.equal(fake.launches, 1);
-    assert.equal(fake.contexts.length, 1);
-    assert.equal(second.context, first.context);
-    assert.equal(second.context.clearedCookies, 1);
+    assert.equal(fake.contexts.length, 2);
+    assert.notEqual(second.context, first.context);
+    assert.equal(first.context.closed, true);
     await second.release();
+    await pool.drainAndClose();
+  });
+
+  await run("ten sequential acquisitions launch one browser", async () => {
+    const fake = createFakeLauncher();
+    const pool = new BrowserPool({ size: 3, launcher: fake.launch });
+    for (let i = 0; i < 10; i += 1) {
+      const lease = await pool.acquire({ browserType: "chromium", contextOptions: { viewport: { width: 1280, height: 720 } } });
+      await lease.release();
+    }
+    assert.equal(fake.launches, 1);
+    assert.equal(fake.launches <= 3, true);
     await pool.drainAndClose();
   });
 
@@ -82,26 +98,26 @@ async function main() {
     await pool.drainAndClose();
   });
 
-  await run("separates locale and viewport cache keys", async () => {
+  await run("passes viewport and locale options to fresh contexts", async () => {
     const fake = createFakeLauncher();
     const pool = new BrowserPool({ size: 2, launcher: fake.launch });
     const en = await pool.acquire({ browserType: "chromium", contextOptions: { locale: "en-US", viewport: { width: 800, height: 600 } } });
-    const it = await pool.acquire({ browserType: "chromium", contextOptions: { locale: "it-IT", viewport: { width: 800, height: 600 } } });
-    assert.notEqual(en.context, it.context);
-    assert.equal(pool.getStats().length, 2);
+    const it = await pool.acquire({ browserType: "chromium", contextOptions: { locale: "it-IT", viewport: { width: 390, height: 844 } } });
+    assert.deepEqual(en.context.options.viewport, { width: 800, height: 600 });
+    assert.equal(it.context.options.locale, "it-IT");
+    assert.equal(pool.getStats()[0].inUse, 2);
     await en.release();
     await it.release();
     await pool.drainAndClose();
   });
 
-  await run("drain closes idle contexts", async () => {
+  await run("drain closes active contexts and browser", async () => {
     const fake = createFakeLauncher();
     const pool = new BrowserPool({ size: 1, launcher: fake.launch });
     const lease = await pool.acquire({ browserType: "chromium" });
-    const context = lease.context;
-    await lease.release();
     await pool.drainAndClose();
-    assert.equal(context.closed, true);
+    assert.equal(lease.context.closed, true);
+    assert.equal(fake.browsers[0].closed, true);
     assert.equal(pool.getStats().length, 0);
   });
 

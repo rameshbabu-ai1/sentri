@@ -484,7 +484,7 @@ export const explorerDurationSeconds = new client.Histogram({
 // MNT-015 — browser pool and per-workspace AI limiter telemetry.
 export const browserPoolSize = new client.Gauge({
   name: "app_browser_pool_size",
-  help: "MNT-015 — configured warm browser-context pool capacity by browser type.",
+  help: "MNT-015 — configured warm browser slot capacity by browser type.",
   labelNames: ["type"],
   registers: [register],
 });

@@ -147,10 +147,17 @@ export async function incrWithExpiry(key, cost = 1, windowSec = 60) {
   const safeCost = Math.max(1, Number.parseInt(cost, 10) || 1);
   const safeWindow = Math.max(1, Number.parseInt(windowSec, 10) || 60);
   if (isRedisAvailable()) {
-    const result = await redis.multi().incrby(key, safeCost).expire(key, safeWindow, "NX").ttl(key).exec();
-    const value = Number(result?.[0]?.[1] || 0);
-    const ttl = Math.max(1, Number(result?.[2]?.[1] || safeWindow));
-    return { value, ttl };
+    const script = `
+      local value = redis.call("INCRBY", KEYS[1], ARGV[1])
+      local ttl = redis.call("TTL", KEYS[1])
+      if ttl < 0 then
+        redis.call("EXPIRE", KEYS[1], ARGV[2])
+        ttl = tonumber(ARGV[2])
+      end
+      return { value, ttl }
+    `;
+    const result = await redis.eval(script, 1, key, safeCost, safeWindow);
+    return { value: Number(result?.[0] || 0), ttl: Math.max(1, Number(result?.[1] || safeWindow)) };
   }
   const now = Date.now();
   const existing = _memoryCounters.get(key);

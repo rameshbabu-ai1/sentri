@@ -45,7 +45,7 @@ export function aiRateLimit(opts = {}) {
       if (!workspaceId) return next();
       const cost = Math.max(1, Number.parseInt(costFn(req), 10) || 1);
       const cap = cost > 1 ? aiCap : regularCap;
-      const key = `sentri:rl:${workspaceId}:ai`;
+      const key = `${workspaceId}:ai`;
       const { value, ttl } = await incrWithExpiry(key, cost, windowSec);
       if (value > cap) {
         const role = req.workspaceRole || req.userRole || req.user?.role || "unknown";

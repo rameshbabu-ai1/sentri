@@ -511,7 +511,7 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
     browser = {
       isConnected: () => true,
       newContext: async (contextOptions = {}) => {
-        const lease = await browserPool.acquire({ browserType: resolvedBrowser, contextOptions });
+        const lease = await browserPool.acquire({ browserType: resolvedBrowser, contextOptions, createPage: false });
         return lease.context;
       },
     };
@@ -520,6 +520,7 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
     try {
       traceLease = await browserPool.acquire({
         browserType: resolvedBrowser,
+        createPage: false,
         contextOptions: {
           userAgent: "Mozilla/5.0 (compatible; AutonomousQA/1.0)",
           viewport: { width: 1280, height: 720 },

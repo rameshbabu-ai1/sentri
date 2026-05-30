@@ -303,7 +303,7 @@ S3_ENDPOINT=https://minio.internal:9000
 | `API_TEST_TIMEOUT` | `30000` | Per-API-test timeout (ms) |
 | `BROWSER_TEST_TIMEOUT` | `120000` | Per-browser-test timeout guard (ms) |
 | `PARALLEL_WORKERS` | `1` | Concurrent browser contexts (1–10). Override per-run from UI |
-| `BROWSER_POOL_SIZE` | `PARALLEL_WORKERS` / `MAX_WORKERS` | Warm browser contexts retained per browser/profile by the MNT-015 runner pool |
+| `BROWSER_POOL_SIZE` | `WORKER_CONCURRENCY` / `MAX_WORKERS` | Warm browser slots retained per browser type by the MNT-015 runner pool |
 | `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` | — | Custom Chromium executable path |
 
 ### Crawler
