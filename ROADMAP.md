@@ -51,6 +51,7 @@ The following items have been verified complete against the codebase and are **n
 
 | ID | Title | PR / Commit                                                     |
 |----|-------|-----------------------------------------------------------------|
+| MNT-015 | Browser pool reuse + per-tenant cost-weighted AI rate limiting — warm Playwright browser-process pool with fresh-context-per-acquire isolation, FIFO waiter queue, `BROWSER_POOL_SIZE` default `WORKER_CONCURRENCY`/`MAX_WORKERS`; per-workspace AI cost limiter (AI=10 units, regular=1) in `backend/src/middleware/aiRateLimit.js` keyed on `workspaceId:ai` via new `incrWithExpiry()` Redis Lua helper, mounted on `POST /chat`, `POST /projects/:id/crawl`, `POST /projects/:id/tests/generate`, `POST /tests/:testId/fix`, `POST /settings/agent-roles/:role/test`; graceful-shutdown drain hooks in `backend/src/index.js` + `backend/src/worker.js` before queue/Redis teardown; 4 Prometheus metrics (`app_browser_pool_size`, `app_browser_pool_in_use`, `app_browser_pool_acquires_total`, `app_ai_rate_limited_total`). | PR #1 |
 | AUTO-023 | Autonomous multi-agent collaboration — 5-bundle plan (envelope schema → linear handoff → reviewer↔author loop → supervisor orchestrator → shared memory + tool calling). | PR #34, #35, #36, #37, #38 |
 | INF-009 | Helm chart + Kubernetes readiness/liveness probes + disaster-recovery playbook (nightly `pg_dump -Fc` to S3, RTO < 4h / RPO < 24h). | PR #30 |
 | S3-02 | Shadow DOM support in crawler | PR #55                                                          |
@@ -1257,27 +1258,11 @@ Full details: see Completed Work Summary table § INF-009 row.
 
 ---
 
-### MNT-015 — Browser pool reuse + per-tenant rate limiting 🟡 High
+### MNT-015 — Browser pool reuse + per-tenant rate limiting
 
-**Status:** 🔲 Planned | **Effort:** M | **Source:** AUDIT.md P4, B8 (formerly `PERF-001` in AUDIT_IMPL.md)
+**Status:** ✅ Complete (PR #1) — see Completed Work Summary above for the full implementation details. Shipped scope: warm Playwright browser-process pool in `backend/src/runner/browserPool.js` (per-`browserType` bucket with FIFO waiter queue, `BROWSER_POOL_SIZE` env default `WORKER_CONCURRENCY` / `MAX_WORKERS`); `testRunner.js` + `runner/executeTest.js` switched to `browserPool.acquire()` / release. **Design deviation from original spec:** the pool keeps the *browser process* warm but creates a fresh `BrowserContext` per acquire (closed on release) to preserve per-tenant isolation of storage state, video, and tracing — the spec's "warm BrowserContext with `clearCookies()`/`clearPermissions()`" would have leaked storage across workspaces. Per-workspace AI cost-weighted limiter in `backend/src/middleware/aiRateLimit.js` (AI mutation = 10 units, regular = 1 unit) keyed on `workspaceId:ai` via new `incrWithExpiry()` Redis Lua helper in `backend/src/utils/redisClient.js`; mounted on `POST /chat`, `POST /projects/:id/crawl`, `POST /projects/:id/tests/generate`, `POST /tests/:testId/fix`, `POST /settings/agent-roles/:role/test` in `backend/src/index.js` (not `appSetup.js` as originally specified — route names also updated to match current routes: `/tests/:testId/fix` instead of legacy `/tests/:id/regenerate`). Graceful shutdown drains the pool before queue / Redis teardown in `backend/src/index.js` + `backend/src/worker.js`. Telemetry: `app_browser_pool_size{type}`, `app_browser_pool_in_use{type}`, `app_browser_pool_acquires_total{type,outcome}`, `app_ai_rate_limited_total{workspace_role}` in `backend/src/utils/metrics.js`. New env vars documented: `BROWSER_POOL_SIZE`, `AI_RATE_LIMIT_PER_MIN`, `AI_RATE_LIMIT_REGULAR_PER_MIN`, `AI_RATE_LIMIT_WINDOW_SEC`. New tests registered in `backend/tests/run-tests.js`: `browser-pool.test.js` (acquire/release, FIFO queue, drain), `ai-rate-limit.test.js` (cost-weighted increment, sibling-workspace isolation, `Retry-After` on 429, bypass without `workspaceId`).
 
-**Problem:** Every test run cold-starts a new Chromium instance. For a 50-test suite this is 50 browser launches. A browser pool reduces wall-clock run time by 40–60%. AI endpoints (expensive) share rate-limit buckets with cheap GETs (ENH-005 is global-tier only).
-
-**Fix:** Extract a `BrowserPool` class (`backend/src/runner/browserPool.js`) maintaining N warm contexts (`MAX_WORKERS` default). Each test execution checks out a context and returns it without closing the browser. Add per-workspace AI rate limiting with cost weighting (AI call = 10 units, regular call = 1 unit), stored in Redis under `workspaceId:ai` keys.
-
-**Files to change:**
-- New `backend/src/runner/browserPool.js`
-- `backend/src/testRunner.js` — use `BrowserPool` instead of `playwright.launch()` per test
-- `backend/src/middleware/appSetup.js` — per-workspace AI rate limiter middleware
-- `backend/src/utils/redisClient.js` — `incrWithExpiry(key, cost, windowSec)`
-- `backend/.env.example` — `BROWSER_POOL_SIZE`
-
-**Acceptance criteria:**
-- A 10-test suite run starts in ≤3 browser launch events.
-- A workspace exceeding its AI rate limit receives 429 with `Retry-After` without affecting other workspaces.
-- Draining the pool on graceful shutdown closes all browser contexts cleanly.
-
-**Dependencies:** INF-007 (metrics to measure pool hit/miss rate).
+**Effort:** M | **Source:** AUDIT.md P4, B8 (formerly `PERF-001` in AUDIT_IMPL.md)
 
 ---
 
