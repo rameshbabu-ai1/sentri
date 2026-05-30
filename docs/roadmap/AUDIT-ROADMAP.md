@@ -68,7 +68,66 @@ codebase sits today and what "industry-standard autonomous QA platform" requires
 **Covers sub-items:** RLY-001 (run checkpointing), RLY-008 (SQLite write
 contention), RLY-005 (snapshot memory safety)
 
-**Status:** 🔲 Planned | **Effort:** L | **Source:** Audit §A.2 · §J Scenarios 1–4
+**Status:** ✅ Complete (PR #2) | **Effort:** L | **Source:** Audit §A.2 · §J Scenarios 1–4
+
+**Shipped artefacts (PR #2):**
+
+- Migrations `065_run_test_results.sql`, `066_crawl_snapshots.sql`,
+  `067_run_checkpoint.sql`. All three carry `ON DELETE CASCADE` on `runId`
+  for SOC 2 CC8.1 audit-trail integrity.
+- `runTestResultRepo.js` (B1.1) — append-only repo with `INSERT OR IGNORE`
+  idempotency, `getCompletedTestIds()` for the resume checkpoint, and the
+  duplicate-write counter `app_run_test_result_duplicates_total{reason}`.
+- `crawlSnapshotRepo.js` (B1.3) — wired into both `crawlBrowser.js`
+  (`page.goto` timing → `loadMs`) and `stateExplorer.js#captureState()`.
+- `utils/dbWriteQueue.js` (B1.2) — tiered-durability queue: `"batched"`
+  (default, lossy on SIGKILL) and `"durable"` (synchronous BEGIN/COMMIT,
+  lose-nothing). Matches Postgres `synchronous_commit` / Kafka `acks` /
+  MySQL `sync_binlog` industry pattern. Poison-pill replay skips the
+  failing slot so a single bad write never drops siblings.
+- `testRunner.js` per-test flush uses `priority: "durable"` — checkpoint
+  writes are crash-durable matching GitHub Actions `re-run failed jobs`
+  / CircleCI `rerun-from-failed` / AWS Step Functions / Temporal
+  checkpoint semantics. The legacy `runRepo.save(run)` /
+  `runRepo.appendRunResults()` paths are preserved so pre-B1 consumers
+  reading `run.results` keep working.
+- `runRepo.markOrphansInterrupted()` returns `{ count, ids }` and stamps
+  `failureReason='process_crash'` distinct from user-abort and ordinary-
+  failure rows. Graceful-shutdown drain plumbed through `index.js` AND
+  the standalone `worker.js` (the primary execution environment for
+  BullMQ-dispatched runs) so SIGTERM loses no buffered writes.
+- `POST /api/v1/runs/:runId/resume` admin-only endpoint replays env +
+  testQueue from the persisted run row, skips tests already in
+  `run_test_results`, gates against active sibling runs / wrong status
+  / missing env / no-remaining-tests. RunDetail surfaces a `Resume`
+  button + an `Interrupted` badge for crash-recovered runs;
+  `frontend/src/api.js#resumeRun` helper.
+- Four Prometheus metrics: `app_db_write_queue_depth`,
+  `app_db_write_batch_duration_seconds`, `app_db_write_batch_size`,
+  `app_run_test_result_duplicates_total{reason}`.
+- Tests: `backend/tests/run-checkpoint.test.js` (7 cases),
+  `backend/tests/db-write-queue.test.js` (8 cases),
+  `backend/tests/crawl-snapshot-streaming.test.js` (8 cases) — all
+  registered in `backend/tests/run-tests.js`.
+- `.env.example`: `DB_WRITE_BATCH_SIZE`, `DB_WRITE_FLUSH_MS`,
+  `CHECKPOINT_STALE_MS`.
+
+**Scope deviations from the original spec (intentional):**
+
+- Migration numbers landed as `065/066/067` (not `062/063/064` from the
+  original write-up) because `061_agent_messages.sql` shipped on a
+  parallel PR before B1 merged.
+- B1.3 ships as **persistence-only**, not as the per-page generation
+  pipeline-inversion the original spec described. Per-page generation
+  would break (a) cross-page journey discovery via `buildUserJourneys`
+  in `crawler.js`, (b) diff-aware baseline filtering, and (c) cross-page
+  PII sanitisation in `sanitizeRunInputs`. The legacy in-memory
+  `snapshots[]` accumulation is kept as the shadow path during the B1
+  → B2 transition. Heap stays O(N pages) for the duration of the crawl
+  but per-page persistence still gives crash-recovery + B2's `loadMs`
+  consumer. A follow-up roadmap item should track the pipeline
+  redesign if O(N) heap is later measured to be a real problem on
+  customer crawls.
 
 **Problem (three tightly-coupled issues, one migration sprint):**
 
@@ -1153,7 +1212,7 @@ collapsed), AUTO-023 ✅ (oracle agent role + tool registry), AUTO-009 ✅
 
 | Bundle | Items | Priority | Effort | Status |
 |--------|-------|----------|--------|--------|
-| B1 — Run persistence + crash recovery | RLY-001, RLY-008, RLY-005 | 🔴 P0 | L | 🔲 Planned |
+| B1 — Run persistence + crash recovery | RLY-001, RLY-008, RLY-005 | 🔴 P0 | L | ✅ Complete (PR #2) |
 | B2 — iframe + adaptive timeouts + SPA | RLY-006, RLY-009 | 🔴 P0 | L | 🔲 Planned |
 | B3 — Reviewer independence + escalation | RLY-003, QAL-004 | 🔴 P0 | M | 🔲 Planned |
 | B4 — Auth recovery + target-app TOTP | RLY-004, SCL-001 | 🔴 P0 | M | 🔲 Planned |
@@ -1162,7 +1221,7 @@ collapsed), AUTO-023 ✅ (oracle agent role + tool registry), AUTO-009 ✅
 | B7 — Healing safety + context robustness | QAL-006, QAL-007, QAL-008, QAL-009 | 🟡 P1 | L | 🔲 Planned |
 | B8 — Goal-based autonomy + coverage | GOL-001, SCL-004, AUTO-011, AUTO-021 | 🟢 Strategic | XL | 🔲 Planned |
 
-**Totals — Phase 6:** ✅ Done: 0 · 🔲 Pending: 8 bundles (27 sub-items)
+**Totals — Phase 6:** ✅ Done: 1 (B1 — 3 sub-items) · 🔲 Pending: 7 bundles (24 sub-items)
 
 ---
 
