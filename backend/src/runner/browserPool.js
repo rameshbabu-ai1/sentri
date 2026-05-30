@@ -225,6 +225,30 @@ export class BrowserPool {
   }
 
   /**
+   * Read-only `isConnected()` probe for the cached warm browser of a type.
+   *
+   * Returns `true` when no browser has been launched for this type yet
+   * (so callers' health probes treat "pre-launch" as connected and let
+   * the first `acquire()` surface launch errors via its own path).
+   * Returns the underlying `browser.isConnected()` once a warm handle
+   * is cached so callers see a real disconnect (Chromium OOM kill,
+   * CDP socket drop) before paying the `newContext()` round-trip.
+   *
+   * @param {string} [browserType]
+   * @returns {boolean}
+   */
+  isBrowserConnected(browserType) {
+    try {
+      const { name } = resolveBrowser(browserType);
+      const bucket = this.buckets.get(name);
+      if (!bucket || !bucket.browser) return true;
+      return typeof bucket.browser.isConnected === "function" ? bucket.browser.isConnected() : true;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
    * Close all active contexts/browsers and reject queued waiters.
    *
    * After drain the pool is permanently sealed for this process — subsequent

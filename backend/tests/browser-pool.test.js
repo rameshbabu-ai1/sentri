@@ -163,6 +163,21 @@ async function main() {
     assert.equal(fake.launches, 0);
   });
 
+  await run("isBrowserConnected reflects the cached browser's real state", async () => {
+    const fake = createFakeLauncher();
+    const pool = new BrowserPool({ size: 1, launcher: fake.launch });
+    // Pre-launch: report connected so callers' first acquire isn't blocked.
+    assert.equal(pool.isBrowserConnected("chromium"), true);
+    const lease = await pool.acquire({ browserType: "chromium" });
+    assert.equal(pool.isBrowserConnected("chromium"), true);
+    // Simulate a Chromium crash + disconnect after acquire.
+    fake.browsers[0].closed = true;
+    fake.browsers[0].emit("disconnected");
+    assert.equal(pool.isBrowserConnected("chromium"), true); // bucket evicted, treated as pre-launch
+    await lease.release();
+    await pool.drainAndClose();
+  });
+
   await run("acquireSharedBrowser does not occupy a pool slot (deadlock fix)", async () => {
     const fake = createFakeLauncher();
     // Pool sized to 1 reproduces the testRunner.js trace-context deadlock

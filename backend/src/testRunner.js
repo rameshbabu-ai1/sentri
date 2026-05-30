@@ -507,8 +507,16 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
   structuredLog("run.start", { runId, projectId: project.id, tests: tests.length, workers, allApiOnly, browser: resolvedBrowser });
 
   if (!allApiOnly) {
+    // Lazy shim: forwards `newContext()` into the pool while keeping the
+    // `isConnected()` health probe (`executeTest.js:484` Bundle-B fix #5)
+    // honest. Without this, the probe would always return `true` and an
+    // OOM-killed Chromium between tests would skip the structured
+    // `ERR_BROWSER_DISCONNECTED` early-fail path, surfacing instead as
+    // a less-helpful "Target closed" deep inside `newContext`. The pool
+    // tracks its warm browser per type; the read-only helper reflects
+    // the cached handle's real connection state.
     browser = {
-      isConnected: () => true,
+      isConnected: () => browserPool.isBrowserConnected(resolvedBrowser),
       newContext: async (contextOptions = {}) => {
         const lease = await browserPool.acquire({ browserType: resolvedBrowser, contextOptions, createPage: false });
         return lease.context;
