@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **B1.1 (AUDIT-ROADMAP)** — New `run_test_results` append-only table (migration `065`) flushes per-test outcomes the moment they complete, so a SIGKILL mid-run preserves every result collected up to that point.
+- **B1.1 (AUDIT-ROADMAP)** — New `run_test_results` append-only table (migration `065`) flushes per-test outcomes durably (synchronous BEGIN/COMMIT via `dbWriteQueue` `"durable"` mode) so SIGKILL / OOM mid-run loses zero results, matching GitHub Actions / CircleCI / AWS Step Functions crash-recovery semantics.
 - **B1.1 (AUDIT-ROADMAP)** — `ON DELETE CASCADE` on `run_test_results.runId` mirrors `run_logs` for SOC 2 CC8.1 audit-trail integrity on parent-run purge.
 - **B1.1 (AUDIT-ROADMAP)** — Duplicate-write observability: `runTestResultRepo.append()` bumps `app_run_test_result_duplicates_total{reason}` and emits a structured warn log on `duplicate_dispatch` hits, so silent drops are alertable.
 - **B1.2 (AUDIT-ROADMAP)** — Tiered-durability write queue (`utils/dbWriteQueue.js`): `"batched"` mode (<1 ms enqueue, may lose one batch on SIGKILL) and `"durable"` mode (synchronous commit, lose-nothing). Tuneable via `DB_WRITE_BATCH_SIZE` / `DB_WRITE_FLUSH_MS`; PostgreSQL is a passthrough.
