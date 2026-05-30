@@ -35,7 +35,8 @@ import { detectCoverageRegression, fireCoverageRegressionAlert } from "./pipelin
 import { runFeedbackLoop } from "./runner/feedbackIntegration.js";
 import { isSmokeTest } from "./pipeline/riskScorer.js";
 import { clusterFailures } from "./pipeline/failureClusterer.js";
-import { TRACES_DIR, DEFAULT_PARALLEL_WORKERS, MAX_TEST_RETRIES, launchBrowser, resolveBrowser, BROWSER_HEADLESS } from "./runner/config.js";
+import { TRACES_DIR, DEFAULT_PARALLEL_WORKERS, MAX_TEST_RETRIES, resolveBrowser, BROWSER_HEADLESS } from "./runner/config.js";
+import { browserPool } from "./runner/browserPool.js";
 import { executeWithRetries } from "./runner/retry.js";
 import { finalizeRunIfNotAborted, isRunAborted } from "./utils/abortHelper.js";
 import { trackTelemetry } from "./utils/telemetry.js";
@@ -497,6 +498,7 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
 
   let browser = null;
   let traceContext = null;
+  let traceLease = null;
 
   // DIF-002: resolve the requested browser once so we can log + persist a
   // canonical name (invalid / unknown values fall back to chromium).
@@ -506,42 +508,34 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
   structuredLog("run.start", { runId, projectId: project.id, tests: tests.length, workers, allApiOnly, browser: resolvedBrowser });
 
   if (!allApiOnly) {
-    try {
-      browser = await launchBrowser({ browser: resolvedBrowser });
-    } catch (launchErr) {
-      const classified = classifyError(launchErr, "run");
-      run.status = "failed";
-      run.error = classified.message;
-      run.errorCategory = classified.category;
-      run.finishedAt = new Date().toISOString();
-      // CAP-002 — no tests will execute on this run, so no shard will drain
-      // naturally via processResult. Mark every shard as "completed" so the
-      // UI badge reads `N/N` rather than `0/N` after a hard launch failure.
-      run.shardsCompleted = shardCount;
-      logError(run, classified.message);
-      structuredLog("browser.launch_failed", { runId, error: classified.message });
-      throw launchErr;
-    }
-    structuredLog("browser.launched", { runId });
+    browser = {
+      isConnected: () => true,
+      newContext: async (contextOptions = {}) => {
+        const lease = await browserPool.acquire({ browserType: resolvedBrowser, contextOptions });
+        return lease.context;
+      },
+    };
 
-    // Shared tracing context (separate from per-test video contexts)
+    // Shared tracing context (separate from per-test contexts)
     try {
-      traceContext = await browser.newContext({
-        userAgent: "Mozilla/5.0 (compatible; AutonomousQA/1.0)",
-        viewport: { width: 1280, height: 720 },
+      traceLease = await browserPool.acquire({
+        browserType: resolvedBrowser,
+        contextOptions: {
+          userAgent: "Mozilla/5.0 (compatible; AutonomousQA/1.0)",
+          viewport: { width: 1280, height: 720 },
+        },
       });
+      traceContext = traceLease.context;
       await traceContext.tracing.start({ screenshots: true, snapshots: true, sources: false });
     } catch (ctxErr) {
-      await browser.close().catch(() => {});
       const classified = classifyError(ctxErr, "run");
       run.status = "failed";
       run.error = classified.message;
       run.errorCategory = classified.category;
       run.finishedAt = new Date().toISOString();
-      // CAP-002 — same rationale as the browser.launch_failed branch above:
-      // no tests run, so flush shardsCompleted to shardCount for UI clarity.
       run.shardsCompleted = shardCount;
       logError(run, classified.message);
+      structuredLog("browser.pool_acquire_failed", { runId, error: classified.message });
       throw ctxErr;
     }
   }
@@ -880,12 +874,8 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
       } catch (e) {
         logWarn(run, `Trace save failed: ${e.message}`);
       }
-      await traceContext.close().catch(() => {});
-    }
-    if (browser) {
-      await browser.close().catch((err) => {
-        console.warn(formatLogLine("warn", null, `[testRunner] browser.close() failed: ${err.message}`));
-      });
+      if (traceLease) await traceLease.release().catch(() => {});
+      else await traceContext.close().catch(() => {});
     }
   }
 

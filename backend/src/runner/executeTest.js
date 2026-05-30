@@ -1048,7 +1048,11 @@ export async function executeTest(test, browser, runId, stepIndex, runStart, opt
 
     // Close page first then context — this flushes video to disk
     await page.close().catch(() => {});
-    await context.close().catch(() => {});
+    if (context.__sentriPoolRelease) {
+      await context.__sentriPoolRelease().catch(() => {});
+    } else {
+      await context.close().catch(() => {});
+    }
 
     // Bundle-B fix #3 — Move the video to a stable named path using async
     // fs/promises. Sync FS calls in this hot cleanup path were blocking the

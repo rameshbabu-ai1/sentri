@@ -43,6 +43,8 @@ import { closeRedis } from "./utils/redisClient.js";
 import { ensureDefaultWorkspaces } from "./database/repositories/workspaceRepo.js";
 import { closeQueue } from "./queue.js";
 import { startWorker, stopWorker } from "./workers/runWorker.js";
+import { browserPool } from "./runner/browserPool.js";
+import { aiRateLimit } from "./middleware/aiRateLimit.js";
 
 // ─── App + global middleware ──────────────────────────────────────────────────
 import { app, serveIndexWithNonce } from "./middleware/appSetup.js";
@@ -218,14 +220,17 @@ async function gracefulShutdown(signal) {
       runAbortControllers.clear();
     }
 
-    // 5. Stop BullMQ worker and close queue (INF-003)
+    // 5. Drain warm Playwright contexts before queue / Redis teardown (MNT-015)
+    await browserPool.drainAndClose();
+
+    // 6. Stop BullMQ worker and close queue (INF-003)
     await stopWorker();
     await closeQueue();
 
-    // 6. Close Redis connections (INF-002)
+    // 7. Close Redis connections (INF-002)
     await closeRedis();
 
-    // 7. Close database cleanly (WAL checkpoint for SQLite, pool drain for PostgreSQL)
+    // 8. Close database cleanly (WAL checkpoint for SQLite, pool drain for PostgreSQL)
     await closeDatabase();
     console.log(formatLogLine("info", null, "[shutdown] Graceful shutdown complete"));
     process.exit(0);
@@ -315,6 +320,18 @@ app.get("/api/docs", (req, res) => {
 
 // All other API routes require a valid JWT token + workspace context (ACL-001).
 // workspaceScope injects req.workspaceId and req.userRole from the JWT or DB.
+const aiMutationLimiter = aiRateLimit();
+const aiMutationPaths = [
+  "/chat",
+  "/projects/:id/crawl",
+  "/projects/:id/tests/generate",
+  "/tests/:testId/fix",
+  "/tests/:testId/apply-fix",
+];
+for (const routePath of aiMutationPaths) {
+  app.post(`${API_PREFIX}${routePath}`, requireAuth, workspaceScope, aiMutationLimiter);
+}
+
 app.use(`${API_PREFIX}/projects`, requireAuth, workspaceScope, projectsRouter);
 app.use(API_PREFIX, requireAuth, workspaceScope, testsRouter);
 app.use(API_PREFIX, requireAuth, workspaceScope, runsRouter);

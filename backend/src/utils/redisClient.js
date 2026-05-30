@@ -129,3 +129,36 @@ export async function closeRedis() {
   redisSub = null;
   _connected = false;
 }
+
+const _memoryCounters = new Map();
+
+/**
+ * Atomically increment a counter and attach/refresh an expiry window.
+ *
+ * Uses Redis `MULTI` when available and an in-memory fallback otherwise so
+ * single-process development keeps the same middleware contract.
+ *
+ * @param {string} key
+ * @param {number} cost
+ * @param {number} windowSec
+ * @returns {Promise<{value: number, ttl: number}>}
+ */
+export async function incrWithExpiry(key, cost = 1, windowSec = 60) {
+  const safeCost = Math.max(1, Number.parseInt(cost, 10) || 1);
+  const safeWindow = Math.max(1, Number.parseInt(windowSec, 10) || 60);
+  if (isRedisAvailable()) {
+    const result = await redis.multi().incrby(key, safeCost).expire(key, safeWindow, "NX").ttl(key).exec();
+    const value = Number(result?.[0]?.[1] || 0);
+    const ttl = Math.max(1, Number(result?.[2]?.[1] || safeWindow));
+    return { value, ttl };
+  }
+  const now = Date.now();
+  const existing = _memoryCounters.get(key);
+  if (!existing || existing.expiresAt <= now) {
+    const expiresAt = now + safeWindow * 1000;
+    _memoryCounters.set(key, { value: safeCost, expiresAt });
+    return { value: safeCost, ttl: safeWindow };
+  }
+  existing.value += safeCost;
+  return { value: existing.value, ttl: Math.max(1, Math.ceil((existing.expiresAt - now) / 1000)) };
+}

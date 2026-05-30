@@ -46,7 +46,7 @@ export const BROWSER_PRESETS = [
 ];
 const BROWSER_ENGINES = { chromium, firefox, webkit };
 export const DEFAULT_BROWSER = (() => {
-  const raw = (process.env.BROWSER_DEFAULT || "chromium").toLowerCase();
+  const raw = (process.env.BROWSER_DEFAULT || process.env.BROWSER || "chromium").toLowerCase();
   return BROWSER_ENGINES[raw] ? raw : "chromium";
 })();
 

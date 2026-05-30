@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **MNT-015** — Added a warm Playwright browser-context pool with pool telemetry (`app_browser_pool_*`) and graceful shutdown draining.
+- **MNT-015** — Added per-workspace, cost-weighted AI route limiting with `Retry-After` responses and `app_ai_rate_limited_total` telemetry.
+
+### Performance
+
+- **MNT-015** — Browser test execution now reuses warm contexts instead of launching a cold Chromium process per test, reducing launch overhead for multi-test suites.
+
 ## [1.9.1] — 2026-05-30
 
 ### Security

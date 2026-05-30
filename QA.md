@@ -2169,3 +2169,12 @@ Once-per-release smoke. Pass all 8 sections before tagging.
 - [ ] Worker `/healthz` returns 200 when queue is connected and 503 on Redis outage.
 - [ ] Nightly backup workflow configured with S3 secrets and uploads snapshot artifacts.
 - [ ] DR runbook restore steps verified with `pg_restore`.
+
+
+## Browser pool + per-tenant AI rate limiting (MNT-015)
+- [ ] Run a 10-test browser suite and verify `app_browser_pool_acquires_total{outcome="miss"}` stays at or below 3 for the selected browser/profile.
+- [ ] Confirm `app_browser_pool_in_use{type="chromium"}` rises while tests are active and returns to 0 after the run completes.
+- [ ] Send repeated `POST /api/v1/chat` requests as one workspace until a 429 response is returned with a `Retry-After` header.
+- [ ] Repeat the same request from a sibling workspace and verify it is not blocked by the first workspace's AI bucket.
+- [ ] Send `SIGTERM` to the backend or worker process during an idle period and confirm shutdown logs include browser-pool draining before queue / Redis teardown and no Chromium processes remain.
+- [ ] Verify auth, SSE, `/health`, and regular GET routes are not throttled by the AI-specific limiter.

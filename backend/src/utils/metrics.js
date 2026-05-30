@@ -480,3 +480,32 @@ export const explorerDurationSeconds = new client.Histogram({
   buckets: EXPLORER_DURATION_BUCKETS,
   registers: [register],
 });
+
+// MNT-015 — browser pool and per-workspace AI limiter telemetry.
+export const browserPoolSize = new client.Gauge({
+  name: "app_browser_pool_size",
+  help: "MNT-015 — configured warm browser-context pool capacity by browser type.",
+  labelNames: ["type"],
+  registers: [register],
+});
+
+export const browserPoolInUse = new client.Gauge({
+  name: "app_browser_pool_in_use",
+  help: "MNT-015 — currently checked-out browser contexts by browser type.",
+  labelNames: ["type"],
+  registers: [register],
+});
+
+export const browserPoolAcquiresTotal = new client.Counter({
+  name: "app_browser_pool_acquires_total",
+  help: "MNT-015 — browser pool acquisitions by browser type and outcome (hit, miss, queue).",
+  labelNames: ["type", "outcome"],
+  registers: [register],
+});
+
+export const aiRateLimitedTotal = new client.Counter({
+  name: "app_ai_rate_limited_total",
+  help: "MNT-015 — per-workspace AI limiter rejections by workspace role bucket.",
+  labelNames: ["workspace_role"],
+  registers: [register],
+});
