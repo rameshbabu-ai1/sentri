@@ -91,9 +91,16 @@ import {
 const BATCH_SIZE = Number(process.env.DB_WRITE_BATCH_SIZE) || 50;
 const FLUSH_MS = Number(process.env.DB_WRITE_FLUSH_MS) || 100;
 
-/** @typedef {() => void} WriteFn */
+/**
+ * @typedef {function(): void} WriteFn
+ *   A zero-arg closure that performs one or more `db.prepare(…).run(…)`
+ *   writes. Wrapped by `flushNow()` in a single transaction. JSDoc-form
+ *   (`function(): void`) per AGENTS.md §"Do not use TypeScript syntax in
+ *   JSDoc comments" — the `() => void` arrow form is TypeScript-only and
+ *   trips the `jsdoc -c jsdoc.json` parser at the CI docs build step.
+ */
 
-/** @type {WriteFn[]} */
+/** @type {Array<WriteFn>} */
 const _queue = [];
 let _flushScheduled = false;
 let _flushTimer = null;
