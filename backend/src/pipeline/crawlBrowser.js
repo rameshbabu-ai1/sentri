@@ -92,30 +92,45 @@ export function shouldEnumerateFrame(frameUrl, parentUrl, strategy, allowlist) {
 
 /**
  * AUDIT-ROADMAP B2 — enumerate iframes on a page, snapshot each eligible
- * frame, and persist per-frame snapshots to `crawl_snapshots` with
- * `fromIframe: true` so downstream consumers (test generation,
- * playwrightSelectorGenerator) can wrap selectors in `page.frameLocator()`.
+ * frame, persist per-frame snapshots to `crawl_snapshots`, AND collect
+ * the frame elements (each tagged with `_fromIframe: true` + `iframeSrc`)
+ * so the caller can merge them into the parent snapshot's element list.
+ *
+ * The element merge is the critical path: `crawler.js#filterAndClassify`
+ * → `elementFilter` → `journeyGenerator` consumes only the in-memory
+ * `snapshots[]` array. Without merging frame elements onto the parent
+ * snapshot, iframe content is invisible to test generation even though
+ * the rows exist in `crawl_snapshots`. The merge mirrors how shadow-DOM
+ * elements are handled (`crawlBrowser.js:398-403` — `_fromShadow` flag,
+ * concatenated into `snapshot.elements`).
  *
  * Strictly best-effort: cross-origin frames produce a `SecurityError` on
  * any DOM access (browser policy); each is logged and skipped without
  * failing the crawl. The parent-page snapshot is unaffected — frame
- * enumeration only ADDS rows, never replaces them.
+ * enumeration only ADDS rows + elements, never replaces them.
  *
  * @param {Object} page                  Playwright Page object.
  * @param {string} parentUrl
  * @param {Object} project               Project row (iframeStrategy, iframeAllowlist).
  * @param {Object} run                   Run record (for log).
- * @returns {Promise<{ count: number, skipped: number }>}
+ * @returns {Promise<{ count: number, skipped: number, frameElements: Object[] }>}
+ *   `frameElements` is the flat list of interactive elements gathered from
+ *   every captured frame — each carries `_fromIframe: true` + `iframeSrc`
+ *   so downstream consumers (`playwrightSelectorGenerator`,
+ *   `journeyPrompt`) can wrap their locators in `page.frameLocator(...)…`
+ *   when a future PR teaches the generator to honour the flag (tracked
+ *   under follow-up `B2-FU-1` in `docs/roadmap/AUDIT-ROADMAP.md`).
  */
 async function enumerateFrameSnapshots(page, parentUrl, project, run) {
   const strategy = project?.iframeStrategy || "same-origin";
-  if (strategy === "none") return { count: 0, skipped: 0 };
+  if (strategy === "none") return { count: 0, skipped: 0, frameElements: [] };
 
   const allowlist = Array.isArray(project?.iframeAllowlist) ? project.iframeAllowlist : [];
   let count = 0;
   let skipped = 0;
+  const frameElements = [];
   let frames;
-  try { frames = page.frames(); } catch { return { count: 0, skipped: 0 }; }
+  try { frames = page.frames(); } catch { return { count: 0, skipped: 0, frameElements: [] }; }
 
   for (const frame of frames) {
     if (frame === page.mainFrame()) continue;
@@ -141,6 +156,15 @@ async function enumerateFrameSnapshots(page, parentUrl, project, run) {
       } catch (persistErr) {
         logWarn(run, `Failed to persist iframe snapshot for ${frameUrl}: ${persistErr.message}`);
       }
+      // Tag each frame element so the parent-snapshot merge keeps the
+      // iframe provenance reachable for downstream consumers.
+      // `_iframeSrc` matches the field name on the persisted row so the
+      // generator + healing helpers can read either source consistently.
+      if (Array.isArray(snap.elements)) {
+        for (const el of snap.elements) {
+          frameElements.push({ ...el, _fromIframe: true, _iframeSrc: frameUrl });
+        }
+      }
       count++;
     } catch (err) {
       // Cross-origin DOM access throws SecurityError — the common case for
@@ -155,8 +179,8 @@ async function enumerateFrameSnapshots(page, parentUrl, project, run) {
       skipped++;
     }
   }
-  if (count > 0) log(run, `🪟 iframes: ${count} captured, ${skipped} skipped (${strategy})`);
-  return { count, skipped };
+  if (count > 0) log(run, `🪟 iframes: ${count} captured (${frameElements.length} element${frameElements.length !== 1 ? "s" : ""}), ${skipped} skipped (${strategy})`);
+  return { count, skipped, frameElements };
 }
 
 /**
@@ -421,6 +445,33 @@ export async function crawlPages(project, run, { signal } = {}) {
           }
         }
 
+        // AUDIT-ROADMAP B2 — enumerate same-origin (or allowlisted)
+        // iframes on this page BEFORE persisting / pushing the parent
+        // snapshot, so the merged frame elements travel with the parent
+        // and reach `filterAndClassify` → `elementFilter` →
+        // `journeyGenerator`. Without this merge, iframe content is
+        // observable in `crawl_snapshots` but invisible to test
+        // generation (the in-memory `snapshots[]` array is the
+        // single source of truth the pipeline consumes).
+        //
+        // The merge mirrors the shadow-DOM treatment 40 lines above —
+        // iframe elements are appended to `snapshot.elements` with
+        // `_fromIframe: true` so future PRs can teach the selector
+        // generator to wrap them in `page.frameLocator(...)` (tracked
+        // as follow-up `B2-FU-1`).
+        //
+        // Strictly best-effort and isolated from the outer catch so a
+        // single bad frame can't fail the parent crawl.
+        let frameEnum = { count: 0, skipped: 0, frameElements: [] };
+        try {
+          frameEnum = await enumerateFrameSnapshots(page, url, project, run);
+        } catch (frameErr) {
+          logWarn(run, `iframe enumeration failed for ${url}: ${frameErr.message}`);
+        }
+        if (frameEnum.frameElements.length > 0) {
+          snapshot.elements = [...(snapshot.elements || []), ...frameEnum.frameElements];
+        }
+
         // B1.3 (AUDIT-ROADMAP Bundle 1) — stream the snapshot to
         // `crawl_snapshots` immediately so peak heap stays O(1 page) for a
         // crash-recoverable crawl. Idempotent via `INSERT OR IGNORE` on
@@ -428,21 +479,13 @@ export async function crawlPages(project, run, { signal } = {}) {
         // rather than an error. Best-effort: a persistence hiccup must
         // never fail the crawl (the in-memory `snapshots[]` accumulation
         // below is the legacy shadow path that downstream pipeline stages
-        // still consume during the B1 → B2 transition).
+        // still consume during the B1 → B2 transition). The persisted
+        // row carries the merged frame elements so a resume-from-crash
+        // re-run sees the same generation surface as the original run.
         try {
           crawlSnapshotRepo.save(run.id, url, snapshot, { loadMs });
         } catch (persistErr) {
           logWarn(run, `Failed to persist crawl snapshot for ${url}: ${persistErr.message}`);
-        }
-
-        // AUDIT-ROADMAP B2 — enumerate same-origin (or allowlisted)
-        // iframes on this page and persist their snapshots with
-        // `fromIframe: true`. Strictly best-effort and isolated from the
-        // outer catch so a single bad frame can't fail the parent crawl.
-        try {
-          await enumerateFrameSnapshots(page, url, project, run);
-        } catch (frameErr) {
-          logWarn(run, `iframe enumeration failed for ${url}: ${frameErr.message}`);
         }
 
         snapshots.push(snapshot);
