@@ -51,6 +51,7 @@ The following items have been verified complete against the codebase and are **n
 
 | ID | Title | PR / Commit                                                     |
 |----|-------|-----------------------------------------------------------------|
+| AUTO-014 | Test dependency and execution ordering (per-test `dependsOn`, topological dispatch, upstream-failed and missing-upstream skip markers). | PR #TBD |
 | MNT-015 | Browser pool reuse + per-tenant cost-weighted AI rate limiting (warm Playwright pool, fresh-context-per-acquire, `RateLimit-*` headers, graceful-shutdown drain). | PR #1 |
 | AUTO-023 | Autonomous multi-agent collaboration — 5-bundle plan (envelope schema → linear handoff → reviewer↔author loop → supervisor orchestrator → shared memory + tool calling). | PR #34, #35, #36, #37, #38 |
 | INF-009 | Helm chart + Kubernetes readiness/liveness probes + disaster-recovery playbook (nightly `pg_dump -Fc` to S3, RTO < 4h / RPO < 24h). | PR #30 |
@@ -453,7 +454,7 @@ CAP-002's Redis dependency is a single point of failure. Production SaaS deploym
 
 ### AUTO-011 — Historical trend analysis and anomaly detection 🔵 Medium
 
-**Status:** 🔲 Planned | **Effort:** M | **Source:** Competitive Gap Analysis
+**Status:** ✅ Complete (PR #TBD) | **Effort:** M | **Source:** Competitive Gap Analysis
 
 **Problem:** The dashboard shows a pass/fail trend but never detects anomalies. An autonomous system should alert: "Pass rate dropped 20% in the last 3 runs — likely regression introduced." The only statistical logic is a simple `trendDelta` at `Dashboard.jsx:122-126`.
 
@@ -469,7 +470,7 @@ CAP-002's Redis dependency is a single point of failure. Production SaaS deploym
 
 ### AUTO-014 — Test dependency and execution ordering 🔵 Medium
 
-**Status:** 🔲 Planned | **Effort:** M | **Source:** Competitive Gap Analysis
+**Status:** ✅ Complete (PR #TBD) | **Effort:** M | **Source:** Competitive Gap Analysis
 
 **Problem:** Some tests depend on others (login must pass before checkout can run). Sentri has no concept of test dependencies — tests run in arbitrary order within the parallel pool. A failed login test produces cascading failures with no indication that the root cause is an upstream dependency.
 

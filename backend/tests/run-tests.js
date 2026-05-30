@@ -290,6 +290,8 @@ const files = [
   "tests/deployment-triggers.test.js",
   "tests/pr11-fixes.test.js",
   "tests/risk-scorer.test.js",
+  "tests/dependency-order.test.js",
+  "tests/test-routes-depends-on.test.js",
   "tests/impact-analysis.test.js",
   "tests/github-checks.test.js",
   "tests/github-install-callback.test.js",

@@ -38,6 +38,7 @@ import { clusterFailures } from "./pipeline/failureClusterer.js";
 import { TRACES_DIR, DEFAULT_PARALLEL_WORKERS, MAX_TEST_RETRIES, resolveBrowser, BROWSER_HEADLESS } from "./runner/config.js";
 import { browserPool } from "./runner/browserPool.js";
 import { executeWithRetries } from "./runner/retry.js";
+import { computeUpstreamSkips, topologicalSortTests } from "./runner/dependencyOrder.js";
 import { finalizeRunIfNotAborted, isRunAborted } from "./utils/abortHelper.js";
 import { trackTelemetry } from "./utils/telemetry.js";
 import { emitRunEvent, log, logWarn, logError, logSuccess } from "./utils/runLogger.js";
@@ -422,13 +423,18 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
   // and only enforces the smoke pin to preserve auditability of the saved
   // run.testQueue order. Stable sort: tests retain their input order within
   // the smoke / non-smoke partitions.
+  const smokeTests = tests.filter((t) => isSmokeTest(t));
+  const nonSmokeTests = tests.filter((t) => !isSmokeTest(t));
+  const { ordered: orderedNonSmokeTests, skipped: missingDependencySkipped } = topologicalSortTests(nonSmokeTests);
   tests = [
-    ...tests.filter((t) => isSmokeTest(t)),
-    ...tests.filter((t) => !isSmokeTest(t)),
+    ...smokeTests,
+    ...orderedNonSmokeTests,
   ];
+  const hasDependencyDeclarations = tests.some((t) => Array.isArray(t.dependsOn) && t.dependsOn.length > 0);
 
   // Resolve concurrency: per-run override → env default → 1 (sequential)
-  const workers = Math.max(1, Math.min(10, parallelWorkers || DEFAULT_PARALLEL_WORKERS));
+  let workers = Math.max(1, Math.min(10, parallelWorkers || DEFAULT_PARALLEL_WORKERS));
+  if (hasDependencyDeclarations) workers = 1;
 
   // CAP-002 — partition the dispatch queue into `run.shardCount` contiguous
   // slices and tag each test with its shard index. Today the partition runs
@@ -590,6 +596,9 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
   let shardPassed = 0;
   let shardFailed = 0;
   let shardTotalDelta = 0;
+  const resolvedTestIds = new Set((run.results || []).map((r) => r?.testId).filter(Boolean));
+  const failedTestIds = new Set();
+  const upstreamBlockerById = new Map();
 
   // CAP-002 — advance shard progress once per *test* (not per iteration
   // result). Data-driven tests call processResult N times for a single
@@ -625,6 +634,55 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
     }
   }
 
+  function recordSkipResult(test, skipReason, extra = {}) {
+    const result = {
+      testId: test.id,
+      testName: test.name,
+      status: "skipped",
+      skipReason,
+      ...extra,
+    };
+    result._shardIndex = test?._shardIndex ?? 0;
+    run.results.push(result);
+    resolvedTestIds.add(test.id);
+    if (isShardMode) {
+      runRepo.appendRunResults(run.id, [result]);
+    } else {
+      runRepo.save(run);
+    }
+    emitRunEvent(run.id, "result", { result });
+    if (!isRunAborted(run, signal)) {
+      const snapshotRun = isShardMode ? (runRepo.getById(run.id) || run) : run;
+      emitRunEvent(run.id, "snapshot", { run: signRunArtifacts(snapshotRun) });
+    }
+  }
+
+  function blockerFor(test) {
+    const queue = [...(Array.isArray(test?.dependsOn) ? test.dependsOn : [])];
+    const seen = new Set();
+    while (queue.length > 0) {
+      const depId = queue.shift();
+      if (seen.has(depId)) continue;
+      seen.add(depId);
+      if (upstreamBlockerById.has(depId)) return upstreamBlockerById.get(depId);
+      if (failedTestIds.has(depId)) return depId;
+      const depTest = tests.find((t) => t.id === depId);
+      if (depTest) queue.push(...(Array.isArray(depTest.dependsOn) ? depTest.dependsOn : []));
+    }
+    return null;
+  }
+
+  function seedUpstreamFailedSkips() {
+    const skipIds = computeUpstreamSkips(tests, failedTestIds);
+    for (const test of tests) {
+      if (!skipIds.has(test.id) || resolvedTestIds.has(test.id)) continue;
+      const upstreamFailedTestId = blockerFor(test);
+      if (upstreamFailedTestId) upstreamBlockerById.set(test.id, upstreamFailedTestId);
+      recordSkipResult(test, "upstream_failed", { upstreamFailedTestId });
+      recordTestShardComplete(test);
+    }
+  }
+
   // ── Process a single test result — shared by the pool worker callback ────
   function processResult(test, result) {
     // CAP-002 Phase 2 (Prerequisite #3) — stamp the result with its parent
@@ -637,6 +695,7 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
     // default for a single-shard run.
     result._shardIndex = test?._shardIndex ?? 0;
     run.results.push(result);
+    resolvedTestIds.add(test.id);
 
     if (result.videoPath) allVideoSegments.push(result.videoPath);
 
@@ -656,6 +715,7 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
     } else {
       if (!isShardMode) run.failed++;
       shardFailed++;
+      failedTestIds.add(test.id);
       logError(run, `FAILED: ${result.error}`);
     }
     // INF-007: count every executed result (passed + warning + failed) AND
@@ -726,9 +786,16 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
     }
   }
 
+  for (const skippedTest of missingDependencySkipped) {
+    recordSkipResult(skippedTest, "missing_upstream", {
+      missingUpstreamTestId: skippedTest.missingUpstreamTestId || null,
+    });
+  }
+
   try {
     await poolMap(tests, workers, async (test, i) => {
       if (signal?.aborted) return;
+      if (resolvedTestIds.has(test.id)) return;
 
       const hasCode = !!(test.playwrightCode && extractTestBody(test.playwrightCode));
       const workerTag = workers > 1 ? ` [w${(i % workers) + 1}]` : "";
@@ -827,6 +894,7 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
         // CAP-002 — drain the shard counter once per test, after every
         // iteration result has been recorded. See `recordTestShardComplete`.
         recordTestShardComplete(test);
+        seedUpstreamFailedSkips();
         const finalResult = iterResults[iterResults.length - 1];
         if (finalResult) {
           structuredLog("test.result", { runId, testId: test.id, status: finalResult.status, durationMs: finalResult.durationMs });
@@ -854,6 +922,7 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
         // CAP-002 — crash path also resolves the test exactly once, so
         // drain the shard counter here too (matches the success path).
         recordTestShardComplete(test);
+        seedUpstreamFailedSkips();
       }
     }, signal);
   } finally {

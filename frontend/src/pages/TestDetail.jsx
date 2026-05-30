@@ -10,11 +10,13 @@ import {
 import { api } from "../api.js";
 import { queryClient, testQueryKeys, invalidateAutoApprovalsCache } from "../queryClient.js";
 import { useTestDetailQuery } from "../hooks/queries/useTestDetailQuery.js";
+import { useProjectTestsQuery } from "../hooks/queries/useProjectTestsQuery.js";
 const DiffView    = lazy(() => import("../components/ai/DiffView.jsx"));
 const AiFixPanel  = lazy(() => import("../components/ai/AiFixPanel.jsx"));
 import { cleanTestName } from "../utils/formatTestName.js";
 import { testTypeBadgeClass, testTypeLabel, isBddTest } from "../utils/testTypeLabels.js";
 import { exportCsv } from "../utils/exportCsv.js";
+import { findDependencyCycle } from "../utils/dependencyGraph.js";
 import { StatusBadge, ReviewBadge, ScenarioBadges } from "../components/shared/TestBadges.jsx";
 import {
   QualityScoreChip,
@@ -73,6 +75,8 @@ export default function TestDetail() {
   const test = detailQuery.data?.test ?? null;
   const project = detailQuery.data?.project ?? null;
   const runs = detailQuery.data?.runs ?? [];
+  const projectTestsQuery = useProjectTestsQuery(test?.projectId);
+  const projectTests = projectTestsQuery.data ?? [];
   const loading = detailQuery.isLoading;
   const [running, setRunning] = useState(false);
   const { showToast } = useToast();
@@ -95,6 +99,7 @@ export default function TestDetail() {
   const [editDesc, setEditDesc]         = useState("");
   const [editSteps, setEditSteps]       = useState([]);
   const [editPriority, setEditPriority] = useState("medium");
+  const [editDependsOn, setEditDependsOn] = useState([]);
   const [saving, setSaving]             = useState(false);
   const [editError, setEditError]       = useState(null);
 
@@ -172,6 +177,7 @@ export default function TestDetail() {
     setEditDesc(test.description || "");
     setEditSteps([...(test.steps || [])]);
     setEditPriority(test.priority || "medium");
+    setEditDependsOn(Array.isArray(test.dependsOn) ? test.dependsOn : []);
     setEditCode(test.playwrightCode || "");
     setCodeEdited(false);
     setEditError(null);
@@ -192,7 +198,12 @@ export default function TestDetail() {
       if (stepsChanged && test.steps && test.steps.length > 0) {
         setPrevSteps([...test.steps]); setShowDiff(true);
       }
-      const payload = { name: editName.trim(), description: editDesc.trim(), steps: cleanSteps, priority: editPriority };
+      const dependencyCycle = findDependencyCycle(projectTests.map((t) => t.id === testId ? { ...t, dependsOn: editDependsOn } : t));
+      if (dependencyCycle) {
+        setEditError(`Dependency cycle detected: ${dependencyCycle.join(" → ")}`);
+        return;
+      }
+      const payload = { name: editName.trim(), description: editDesc.trim(), steps: cleanSteps, priority: editPriority, dependsOn: editDependsOn };
       if (codeEdited) {
         payload.playwrightCode = editCode;
       } else if (test.playwrightCode && stepsChanged) {
@@ -229,6 +240,7 @@ export default function TestDetail() {
   function handleEditPreview() {
     setEditName(test.name || ""); setEditDesc(test.description || "");
     setEditSteps([...(test.steps || [])]); setEditPriority(test.priority || "medium");
+    setEditDependsOn(Array.isArray(test.dependsOn) ? test.dependsOn : []);
     setEditCode(codePreview.generatedCode); setCodeEdited(true);
     setEditError(null); setEditing(true); setStepsView("source"); setCodePreview(null);
   }
@@ -845,6 +857,48 @@ export default function TestDetail() {
               <span className={`badge ${test.priority === "high" ? "badge-red" : test.priority === "medium" ? "badge-amber" : "badge-gray"}`}>
                 {test.priority || "medium"}
               </span>
+            )}
+          </InfoRow>
+
+          <InfoRow label="Depends on" icon={<GitMerge size={14} />}>
+            {editing ? (
+              <div className="flex-col gap-xs">
+                <select
+                  className="input td-sidebar-select"
+                  multiple
+                  value={editDependsOn}
+                  onChange={(e) => setEditDependsOn(Array.from(e.target.selectedOptions).map((opt) => opt.value))}
+                  aria-label="Depends on tests"
+                >
+                  {dependencyOptions.map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>
+                      {candidate.name || candidate.id}
+                    </option>
+                  ))}
+                </select>
+                {dependencyCycle && (
+                  <span className="badge badge-red">Cycle: {dependencyCycle.join(" → ")}</span>
+                )}
+              </div>
+            ) : (
+              <div className="td-tags-row">
+                {(test.dependsOn || []).length > 0
+                  ? (test.dependsOn || []).map((depId) => {
+                    const dep = projectTests.find((t) => t.id === depId);
+                    return (
+                      <button
+                        key={depId}
+                        type="button"
+                        className="badge badge-blue td-sidebar-tag-badge"
+                        onClick={() => navigate(`/tests/${depId}`)}
+                        title={dep?.name || depId}
+                      >
+                        {dep?.name || depId}
+                      </button>
+                    );
+                  })
+                  : <span className="td-tags-empty">No dependencies</span>}
+              </div>
             )}
           </InfoRow>
 
