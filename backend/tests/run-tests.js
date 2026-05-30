@@ -299,6 +299,10 @@ const files = [
   "tests/shard-config.test.js",
   "tests/run-sharding.test.js",
   "tests/run-storage-concurrency.test.js",
+  // B1 (AUDIT-ROADMAP Bundle 1) — per-test result flush + crash recovery.
+  "tests/run-checkpoint.test.js",
+  // B1.2 (AUDIT-ROADMAP Bundle 1) — write-batching queue durability contract.
+  "tests/db-write-queue.test.js",
   "tests/run-worker-shard-retry.test.js",
   "tests/run-abort-pubsub.test.js",
   "tests/run-shard-crash.test.js",
