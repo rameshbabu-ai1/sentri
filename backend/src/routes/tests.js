@@ -1237,7 +1237,7 @@ router.post("/tests/:testId/baselines/:stepNumber/accept", requireRole("qa_lead"
     res.json({ ok: true, baselinePath, testId: test.id, browser, stepNumber });
   } catch (err) {
     // Log the real error server-side; return a generic message to the client
-    // per AGENT.md ("5xx errors never leak internal details").
+    // per AGENTS.md ("5xx errors never leak internal details").
     console.error(formatLogLine("error", null, `[POST baselines/accept] ${test.id}#${stepNumber}: ${err.message}`));
     res.status(500).json({ error: "Internal server error" });
   }

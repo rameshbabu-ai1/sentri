@@ -566,7 +566,7 @@ async function handleTrigger(req, res) {
   // case (`fallbackReason === null` — some matches, some not). Without the
   // partial-match branch, non-impacted tests would be silently dropped from
   // the run (filtered out at `impactScopedTests` above but never recorded
-  // as a resolution), violating the AGENT.md "every approved test gets a
+  // as a resolution), violating the AGENTS.md "every approved test gets a
   // resolution" rule and breaking the pass-rate denominator. Skipped only
   // when the run is full-suite (`no_changed_files` / `github_fetch_failed`
   // / `crawl_run`) where every test is dispatched.

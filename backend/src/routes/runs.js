@@ -227,7 +227,7 @@ router.post("/projects/:id/run", requireRole("qa_lead"), demoQuota("run"), expen
   // output even though the queue itself follows the approved-test order.
   const riskById = new Map(riskOrderedTests.map((t) => [t.id, t.riskScore]));
   // Pre-seed `results` with "skipped (over budget)" markers — every test must
-  // have a resolution (AGENT.md issue-handling rule); silently dropping
+  // have a resolution (AGENTS.md issue-handling rule); silently dropping
   // budget-truncated tests would violate observability.
   const initialResults = budgetSkipped.map((t) => ({
     testId: t.id,
