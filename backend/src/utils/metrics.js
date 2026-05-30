@@ -384,6 +384,39 @@ export const agentToolCallsTotal = new client.Counter({
   registers: [register],
 });
 
+// B3 (AUDIT-ROADMAP Bundle 3) — reviewer-collapse counter. Increments
+// once per run when the pre-run gate in `crawler.js` detects that the
+// `author` and `reviewer` agent roles resolve to the SAME provider
+// route id. In that configuration the "two-agent" review loop cannot
+// produce independent signal — the reviewer is the author talking to
+// itself at the same temperature against the same prompt vocabulary,
+// so `runReviewerAuthorLoop`'s LLM reviewer pass is skipped in favour
+// of the heuristic `validateTest` path. The counter gives operators
+// a dashboard signal to alert on (e.g. "60% of regressions runs in
+// the last hour collapsed → the workspace needs a distinct reviewer
+// route configured"). Bounded cardinality — no labels.
+//
+// Industry parallel: AWS Config "non-compliant resource" counter +
+// Datadog monitor `notify_audit_log` count — surface the policy
+// violation as a metric, not just a UI badge.
+export const agentReviewerCollapsedTotal = new client.Counter({
+  name: "app_agent_reviewer_collapsed_total",
+  help: "B3 (AUDIT-ROADMAP) — runs where the author/reviewer route collapse gate fired, so the LLM reviewer pass was skipped in favour of heuristic-only validation. Sustained non-zero rate means operators should configure a distinct reviewer route in Settings → Agent Roles.",
+  registers: [register],
+});
+
+// B3 (AUDIT-ROADMAP Bundle 3) — review-rejection counter. Increments
+// per individual test (not per run) every time the reviewer↔author
+// loop terminates with `ReviewRejection` inside the post-run feedback
+// loop. Pair with `app_runs_total` to compute the per-run rejection
+// rate; sustained spikes are a leading signal of reviewer-prompt
+// drift, brittle generation, or a regressed author model.
+export const reviewRejectionsTotal = new client.Counter({
+  name: "app_review_rejections_total",
+  help: "B3 (AUDIT-ROADMAP) — individual tests discarded by ReviewRejection inside the post-run feedback loop. Pair with app_runs_total for per-run rejection rate.",
+  registers: [register],
+});
+
 // Bundle-A fix #3 — Reviewer verdict downgrade counter. Increments every
 // time `runReviewerAuthorLoop` downgrades a `request_revision` verdict to
 // `accept` because every issue referenced an unknown testId (none of

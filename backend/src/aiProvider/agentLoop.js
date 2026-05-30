@@ -3,7 +3,7 @@ import { getCurrentTraceId } from "../utils/observability.js";
 import { agentReviewRounds, reviewerVerdictDowngradedTotal } from "../utils/metrics.js";
 import { readSpendCaps, evaluateSpendCap } from "./quotaGuard.js";
 import { getMaxReviewRounds } from "../database/repositories/agentConfigRepo.js";
-import { resolveRoute } from "./registry.js";
+import { detectReviewerCollapse } from "./reviewerCollapse.js";
 import { PIPELINE_STEPS } from "../utils/pipelineState.js";
 // Loop ceilings live in a leaf constants module (no imports of its own)
 // so `agentLoop.js` and `agentConfigRepo.js` can both reference
@@ -223,11 +223,8 @@ function resolveMaxReviewRounds(callerValue, workspaceId) {
 function maybeWarnSingleAgentCollapse({ runId, workspaceId }) {
   if (!runId || !workspaceId) return;
   try {
-    const author = resolveRoute({ agentRole: "author", workspaceId });
-    const reviewer = resolveRoute({ agentRole: "reviewer", workspaceId });
-    const aId = author?.route?.id;
-    const rId = reviewer?.route?.id;
-    if (!aId || !rId || aId !== rId) return;
+    const info = detectReviewerCollapse(workspaceId);
+    if (!info.collapsed) return;
     emitAgentEvent(runId, {
       step: PIPELINE_STEPS.REVIEW,
       agent: "reviewer",
@@ -235,8 +232,8 @@ function maybeWarnSingleAgentCollapse({ runId, workspaceId }) {
       message: "Author and reviewer share the same provider route — review loop runs but cannot catch model-specific blind spots.",
       data: {
         kind: "single_agent_collapse",
-        routeId: aId,
-        model: reviewer?.route?.model || author?.route?.model || null,
+        routeId: info.routeId,
+        model: info.model,
       },
       workspaceId,
     });
@@ -304,6 +301,25 @@ export async function runReviewerAuthorLoop(initialArtifact, {
   workspaceId = null,
   maxReviewRounds = null,
   loopTimeoutMs = DEFAULT_LOOP_TIMEOUT_MS,
+  // B3 (AUDIT-ROADMAP) — when the upstream pre-run gate detected that
+  // author/reviewer collapse to the same provider route, the caller
+  // passes `reviewerCollapsed: true`. The loop then:
+  //   1. Skips the in-loop AI-005c advisory (the operator already has
+  //      the RunDetail chip + Settings warning banner — emitting a
+  //      duplicate `agent_event` finding per loop is noise).
+  //   2. Auto-detects collapse via `detectReviewerCollapse` when the
+  //      caller passes `null` AND a workspaceId, so existing callers
+  //      that haven't yet propagated the upstream flag still get
+  //      consistent behaviour. Default `null` (auto-detect) → explicit
+  //      `false` (operator forced multi-agent semantics) → explicit
+  //      `true` (caller asserts collapse).
+  // The actual "skip LLM reviewer calls" decision lives at the
+  // CALLER level — `runReviewer` is a caller-supplied closure, so
+  // the caller's heuristic-vs-LLM choice is what determines cost.
+  // The loop's responsibility is observability symmetry: emit the
+  // structured collapse marker once per loop so the audit trail is
+  // searchable, and let the caller's reviewer closure do the rest.
+  reviewerCollapsed = null,
 } = {}) {
   if (typeof runAuthor !== "function" || typeof runReviewer !== "function") {
     throw new Error("runReviewerAuthorLoop requires runAuthor + runReviewer functions");
@@ -328,7 +344,16 @@ export async function runReviewerAuthorLoop(initialArtifact, {
   // skips silently (smoke-test path), and resolveRoute / emitAgentEvent
   // failures are swallowed so the loop never fails because of an
   // observability hiccup.
-  maybeWarnSingleAgentCollapse({ runId, workspaceId });
+  //
+  // B3 (AUDIT-ROADMAP) — caller-asserted `reviewerCollapsed === true`
+  // suppresses this in-loop advisory because the upstream pre-run gate
+  // already emitted the structured collapse marker + populated
+  // `run.reviewerCollapsed`. Emitting the same finding per loop would
+  // produce N duplicate `agent_event` rows on a multi-journey
+  // crawl-mode run.
+  if (reviewerCollapsed !== true) {
+    maybeWarnSingleAgentCollapse({ runId, workspaceId });
+  }
   const maxElapsedMs = clampLoopTimeoutMs(loopTimeoutMs);
   const deadline = Date.now() + maxElapsedMs;
   let round = 0;

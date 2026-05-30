@@ -52,6 +52,10 @@ function rowToProject(row) {
     hydrationType: row.hydrationType || "auto",
     hydrationSelector: row.hydrationSelector || null,
     elementTimeoutOverride: row.elementTimeoutOverride ?? null,
+    // AUDIT-ROADMAP B3 — review-rejection escalation threshold (migration
+    // 070). Default 0 (always notify) matches the column default; -1
+    // means "never notify" (operator opt-out).
+    reviewRejectionAlertThreshold: row.reviewRejectionAlertThreshold ?? 0,
   };
 }
 
@@ -101,6 +105,10 @@ function projectToRow(p) {
     hydrationType: p.hydrationType || "auto",
     hydrationSelector: p.hydrationSelector || null,
     elementTimeoutOverride: Number.isInteger(p.elementTimeoutOverride) ? p.elementTimeoutOverride : null,
+    // AUDIT-ROADMAP B3 — see rowToProject. INTEGER column with default 0;
+    // explicit `null`/undefined collapses to 0 so create() never trips the
+    // column default with a NULL bind from a caller that omits the field.
+    reviewRejectionAlertThreshold: Number.isInteger(p.reviewRejectionAlertThreshold) ? p.reviewRejectionAlertThreshold : 0,
   };
 }
 
@@ -162,8 +170,8 @@ export function create(project) {
   const row = projectToRow(project);
   row.workspaceId = project.workspaceId || null;
   db.prepare(`
-    INSERT INTO projects (id, name, url, credentials, status, qualityGates, webVitalsBudgets, createdAt, workspaceId, autoApproveThreshold, iterationCap, strictPiiFirewall, piiAllowlist, visionHealing, visionHealMaxCallsPerDay, visionHealMaxCostUsdPerMonth, oracleEnabled, reviewerEnabled, oracleMaxCostUsdPerRun, reviewerMaxCostUsdPerRun, coverageEnabled, sourcemapBaseUrl, serverCoverageEndpoint, coverageRegressionThresholdPct, iframeStrategy, iframeAllowlist, hydrationType, hydrationSelector, elementTimeoutOverride)
-    VALUES (@id, @name, @url, @credentials, @status, @qualityGates, @webVitalsBudgets, @createdAt, @workspaceId, @autoApproveThreshold, @iterationCap, @strictPiiFirewall, @piiAllowlist, @visionHealing, @visionHealMaxCallsPerDay, @visionHealMaxCostUsdPerMonth, @oracleEnabled, @reviewerEnabled, @oracleMaxCostUsdPerRun, @reviewerMaxCostUsdPerRun, @coverageEnabled, @sourcemapBaseUrl, @serverCoverageEndpoint, @coverageRegressionThresholdPct, @iframeStrategy, @iframeAllowlist, @hydrationType, @hydrationSelector, @elementTimeoutOverride)
+    INSERT INTO projects (id, name, url, credentials, status, qualityGates, webVitalsBudgets, createdAt, workspaceId, autoApproveThreshold, iterationCap, strictPiiFirewall, piiAllowlist, visionHealing, visionHealMaxCallsPerDay, visionHealMaxCostUsdPerMonth, oracleEnabled, reviewerEnabled, oracleMaxCostUsdPerRun, reviewerMaxCostUsdPerRun, coverageEnabled, sourcemapBaseUrl, serverCoverageEndpoint, coverageRegressionThresholdPct, iframeStrategy, iframeAllowlist, hydrationType, hydrationSelector, elementTimeoutOverride, reviewRejectionAlertThreshold)
+    VALUES (@id, @name, @url, @credentials, @status, @qualityGates, @webVitalsBudgets, @createdAt, @workspaceId, @autoApproveThreshold, @iterationCap, @strictPiiFirewall, @piiAllowlist, @visionHealing, @visionHealMaxCallsPerDay, @visionHealMaxCostUsdPerMonth, @oracleEnabled, @reviewerEnabled, @oracleMaxCostUsdPerRun, @reviewerMaxCostUsdPerRun, @coverageEnabled, @sourcemapBaseUrl, @serverCoverageEndpoint, @coverageRegressionThresholdPct, @iframeStrategy, @iframeAllowlist, @hydrationType, @hydrationSelector, @elementTimeoutOverride, @reviewRejectionAlertThreshold)
   `).run(row);
 }
 
@@ -174,7 +182,7 @@ export function create(project) {
  */
 export function update(id, fields) {
   const db = getDatabase();
-  const allowed = ["name", "url", "credentials", "status", "qualityGates", "webVitalsBudgets", "autoApproveThreshold", "iterationCap", "strictPiiFirewall", "piiAllowlist", "visionHealing", "visionHealMaxCallsPerDay", "visionHealMaxCostUsdPerMonth", "oracleEnabled", "reviewerEnabled", "oracleMaxCostUsdPerRun", "reviewerMaxCostUsdPerRun", "coverageEnabled", "sourcemapBaseUrl", "serverCoverageEndpoint", "coverageRegressionThresholdPct", "iframeStrategy", "iframeAllowlist", "hydrationType", "hydrationSelector", "elementTimeoutOverride"];
+  const allowed = ["name", "url", "credentials", "status", "qualityGates", "webVitalsBudgets", "autoApproveThreshold", "iterationCap", "strictPiiFirewall", "piiAllowlist", "visionHealing", "visionHealMaxCallsPerDay", "visionHealMaxCostUsdPerMonth", "oracleEnabled", "reviewerEnabled", "oracleMaxCostUsdPerRun", "reviewerMaxCostUsdPerRun", "coverageEnabled", "sourcemapBaseUrl", "serverCoverageEndpoint", "coverageRegressionThresholdPct", "iframeStrategy", "iframeAllowlist", "hydrationType", "hydrationSelector", "elementTimeoutOverride", "reviewRejectionAlertThreshold"];
   const sets = [];
   const params = { id };
   for (const key of allowed) {

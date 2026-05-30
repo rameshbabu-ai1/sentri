@@ -308,6 +308,187 @@ export async function fireNotifications(run, project) {
   await Promise.allSettled(dispatches);
 }
 
+// ─── B3 (AUDIT-ROADMAP) — Review-rejection escalation ────────────────────────
+
+/**
+ * Build the deep link URL to a specific test detail page. Mirrors the
+ * shape of `runDetailUrl` so the two surfaces compose into the same
+ * email / Teams card layout.
+ *
+ * @param {string} projectId
+ * @param {string} testId
+ * @returns {string}
+ */
+function testDetailUrl(projectId, testId) {
+  const base = getAppUrl().replace(/\/$/, "");
+  const basePath = (process.env.APP_BASE_PATH || "/").replace(/\/$/, "");
+  return `${base}${basePath}/projects/${projectId}/tests/${testId}`;
+}
+
+/**
+ * B3 (AUDIT-ROADMAP Bundle 3) — fire FEA-001 channels for tests that
+ * the reviewer↔author loop discarded via `ReviewRejection`. Respects
+ * the per-project `reviewRejectionAlertThreshold`:
+ *
+ *   • `null` / `0` → notify on any rejection (default).
+ *   • positive `N` → notify only when `rejections.length >= N`.
+ *   • `-1`         → opt-out, never notify.
+ *
+ * Uses the same Teams / email / webhook channels as `fireNotifications`
+ * — operators don't get a second integration matrix to configure. The
+ * dispatcher is best-effort: every channel error is caught and logged.
+ *
+ * @param {Object}   run
+ * @param {Object}   project
+ * @param {Object[]} rejections - `run.reviewRejectedTests[]`.
+ * @returns {Promise<void>}
+ */
+export async function fireReviewRejectionNotifications(run, project, rejections) {
+  if (!Array.isArray(rejections) || rejections.length === 0) return;
+
+  // Threshold gate. Stored as INTEGER; `null` defaults to 0 (always).
+  const threshold = project?.reviewRejectionAlertThreshold ?? 0;
+  if (threshold < 0) return; // operator opt-out
+  if (threshold > 0 && rejections.length < threshold) return;
+
+  let settings;
+  try {
+    settings = notificationSettingsRepo.getByProjectId(project.id);
+  } catch (err) {
+    console.warn(formatLogLine("warn", null,
+      `[notifications] Failed to read settings for project ${project.id}: ${err.message}`));
+    return;
+  }
+  if (!settings || !settings.enabled) return;
+
+  const deepLink = runDetailUrl(run.id);
+  const subjectShort = `${rejections.length} test${rejections.length !== 1 ? "s" : ""} discarded by review — ${project.name}`;
+  const dispatches = [];
+
+  // Microsoft Teams — Adaptive Card with one fact row per rejection
+  // (capped at 10 to keep payload size bounded; same cap as the
+  // failure-notification path).
+  if (settings.teamsWebhookUrl) {
+    const cappedRejections = rejections.slice(0, 10);
+    const card = {
+      type: "message",
+      attachments: [{
+        contentType: "application/vnd.microsoft.card.adaptive",
+        contentUrl: null,
+        content: {
+          "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+          type: "AdaptiveCard",
+          version: "1.4",
+          body: [
+            {
+              type: "TextBlock",
+              text: `🟠 ${subjectShort}`,
+              weight: "Bolder",
+              size: "Medium",
+              wrap: true,
+            },
+            {
+              type: "FactSet",
+              facts: [
+                { title: "Run", value: run.id },
+                { title: "Discarded", value: String(rejections.length) },
+                { title: "Threshold", value: String(threshold) },
+              ],
+            },
+            {
+              type: "TextBlock",
+              text: `**Discarded tests:**\n${cappedRejections.map(r =>
+                `- ${r.testName || r.testId || "Unknown"} (${r.failureCategory}, ${r.roundsCompleted} round${r.roundsCompleted === 1 ? "" : "s"})`,
+              ).join("\n")}${rejections.length > 10 ? "\n- _(and more…)_" : ""}`,
+              wrap: true,
+              size: "Small",
+            },
+          ],
+          actions: [{ type: "Action.OpenUrl", title: "View Run Details", url: deepLink }],
+        },
+      }],
+    };
+    dispatches.push(
+      safeFetch(settings.teamsWebhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(card),
+        signal: AbortSignal.timeout(10_000),
+      })
+        .then((res) => {
+          if (!res.ok) throw new Error(`Teams webhook returned ${res.status}`);
+          console.log(formatLogLine("info", null,
+            `[notifications] Teams review-rejection notification sent for ${run.id}`));
+        })
+        .catch((err) => console.warn(formatLogLine("warn", null,
+          `[notifications] Teams review-rejection notification failed for ${run.id}: ${err.message}`))),
+    );
+  }
+
+  // Email — list of rejected tests with deep links to TestDetail.
+  if (settings.emailRecipients) {
+    const subject = `[Sentri] 🟠 ${subjectShort}`;
+    const items = rejections.slice(0, 20).map(r => `<li>${escapeHtml(r.testName || r.testId || "Unknown")} <span style="color:#64748b;">— ${escapeHtml(r.failureCategory || "")} after ${r.roundsCompleted} round${r.roundsCompleted === 1 ? "" : "s"}</span>${r.testId && project.id ? ` <a href="${escapeHtml(testDetailUrl(project.id, r.testId))}" style="color:#6366f1;">[view]</a>` : ""}</li>`).join("");
+    const html = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 560px; margin: 0 auto; padding: 32px 24px;">
+        <h2 style="margin: 0 0 16px; font-size: 20px; color: #0f172a;">${escapeHtml(subjectShort)}</h2>
+        <p style="margin: 0 0 12px; font-size: 14px; color: #475569;">The reviewer↔author loop terminated with ReviewRejection on the following test${rejections.length === 1 ? "" : "s"}; they were not promoted to draft. Triage in TestDetail to inspect the agent conversation thread.</p>
+        <ul style="margin: 0 0 20px; padding-left: 20px; font-size: 13px; line-height: 1.6;">${items}</ul>
+        <a href="${escapeHtml(deepLink)}" style="display: inline-block; padding: 10px 24px; background: #6366f1; color: #fff; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 14px;">View Run Details</a>
+      </div>
+    `;
+    const text = [
+      subjectShort,
+      `Run: ${run.id} | Discarded: ${rejections.length} | Threshold: ${threshold}`,
+      `Tests: ${rejections.slice(0, 10).map(r => r.testName || r.testId).join(", ")}`,
+      `Details: ${deepLink}`,
+    ].join("\n\n");
+    const emails = settings.emailRecipients.split(",").map(e => e.trim()).filter(Boolean);
+    for (const to of emails) {
+      dispatches.push(
+        sendEmail({ to, subject, html, text })
+          .then(() => console.log(formatLogLine("info", null,
+            `[notifications] Email review-rejection notification sent to ${to} for ${run.id}`)))
+          .catch(err => console.warn(formatLogLine("warn", null,
+            `[notifications] Email review-rejection notification failed for ${run.id}: ${err.message}`))),
+      );
+    }
+  }
+
+  // Generic webhook — JSON payload with full rejection list (no UI cap;
+  // downstream consumers parse JSON, not Adaptive Cards).
+  if (settings.webhookUrl) {
+    const payload = {
+      event: "test.review_rejected",
+      runId: run.id,
+      projectId: project.id,
+      projectName: project.name,
+      workspaceId: project.workspaceId || null,
+      threshold,
+      reviewRejectedTests: rejections,
+      detailUrl: deepLink,
+      timestamp: new Date().toISOString(),
+    };
+    dispatches.push(
+      safeFetch(settings.webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(10_000),
+      })
+        .then((res) => {
+          if (!res.ok) throw new Error(`Webhook returned ${res.status}`);
+          console.log(formatLogLine("info", null,
+            `[notifications] Webhook review-rejection notification sent for ${run.id}`));
+        })
+        .catch(err => console.warn(formatLogLine("warn", null,
+          `[notifications] Webhook review-rejection notification failed for ${run.id}: ${err.message}`))),
+    );
+  }
+
+  await Promise.allSettled(dispatches);
+}
+
 // ─── SEC-007 Part C: SIEM audit-log forwarder ─────────────────────────────────
 
 /**

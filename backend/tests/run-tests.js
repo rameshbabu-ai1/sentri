@@ -93,6 +93,16 @@ const files = [
   "tests/agent-tool-call-envelope.test.js",
   "tests/agent-tools-orchestrator.test.js",
   "tests/agent-reviewer-loop.test.js",
+  // B3 (AUDIT-ROADMAP Bundle 3) — reviewer-collapse leaf-helper +
+  // loop-option contract pins. Pure unit (no DB seed); the full
+  // crawler.js pre-run gate integration is exercised by the existing
+  // `agent-pipeline-envelope.test.js` suite.
+  "tests/agent-loop-collapse.test.js",
+  // B3 (AUDIT-ROADMAP Bundle 3) — review-rejection escalation gate
+  // contract pins. Covers the threshold modes (-1 / 0 / N), the
+  // notification_settings.enabled gate, and the new metric +
+  // activity-type literals.
+  "tests/review-rejection-notification.test.js",
   "tests/agent-orchestrator.test.js",
   // Bundle-A fix #1 — orchestrator threads `replyToId` across supervisor
   // handoffs so the UI timeline can reconstruct the multi-step thread.
