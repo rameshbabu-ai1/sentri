@@ -131,26 +131,54 @@ function flushNow() {
   const start = Date.now();
   const db = getDatabase();
 
+  // Track which closure threw inside the batch transaction so the replay
+  // path can skip the poison pill instead of re-executing it. Without
+  // this, a closure that calls `generateRunTestResultId()` (or any other
+  // `counterRepo.next()`) before the failing INSERT bumps the SQLite
+  // counter on EVERY replay attempt, leaving permanent gaps in the ID
+  // sequence and emitting a duplicate warn line that's indistinguishable
+  // from a genuinely separate failure on a different write.
+  let poisonIndex = -1;
+  let poisonErr = null;
   try {
     db.transaction(() => {
-      for (const fn of batch) fn();
+      for (let i = 0; i < batch.length; i++) {
+        try {
+          batch[i]();
+        } catch (err) {
+          // Capture-and-rethrow so the transaction rolls back, but the
+          // replay loop can identify which slot to skip.
+          poisonIndex = i;
+          poisonErr = err;
+          throw err;
+        }
+      }
     })();
   } catch (err) {
     // One poison pill must not drop the rest. Replay survivors
-    // individually outside the failed transaction.
+    // individually outside the failed transaction. Skip the captured
+    // poison-pill slot (replaying it would re-throw the same error and
+    // waste any ID-counter increments the closure performed before the
+    // failing INSERT).
+    const known = poisonIndex >= 0 ? ` (slot ${poisonIndex} threw: ${poisonErr?.message || poisonErr})` : "";
     console.warn(formatLogLine(
       "warn",
       null,
-      `[dbWriteQueue] batch of ${batch.length} rolled back: ${err?.message || err} — replaying individually`,
+      `[dbWriteQueue] batch of ${batch.length} rolled back${known} — replaying ${batch.length - (poisonIndex >= 0 ? 1 : 0)} survivor(s)`,
     ));
-    for (const fn of batch) {
+    for (let i = 0; i < batch.length; i++) {
+      if (i === poisonIndex) continue; // skip the known poison pill
       try {
-        db.transaction(() => fn())();
+        db.transaction(() => batch[i]())();
       } catch (replayErr) {
+        // Defence-in-depth: a replay that fails for a different reason
+        // than the captured poison pill (e.g. a UNIQUE constraint that
+        // depended on the rolled-back row) — drop with a structured warn
+        // so operators can correlate via `runId` if the closure carries it.
         console.warn(formatLogLine(
           "warn",
           null,
-          `[dbWriteQueue] dropped one write on replay: ${replayErr?.message || replayErr}`,
+          `[dbWriteQueue] dropped one write on replay (slot ${i}): ${replayErr?.message || replayErr}`,
         ));
       }
     }

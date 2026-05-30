@@ -54,7 +54,7 @@ const JSON_FIELDS = [
   "shardCoverageSummaries", // AUTO-009f: per-shard pre-aggregated coverage (migration 042) — sparse array indexed by shardIndex; merged into `coverageSummary` by the boundary-crossing finalizer.
   "changedFileRanges", // AUTO-009d: per-file head-side line ranges from the PR diff (migration 044)
   "prCoverageDiff", // AUTO-009d: PR-scoped coverage diff output from computePrCoverage (migration 044)
-  "reviewRejectedTests", // B1 (AUDIT-ROADMAP): testIds whose generation the reviewer rejected (migration 064); populated by B3 later, declared here so the JSON column round-trips cleanly.
+  "reviewRejectedTests", // B1 (AUDIT-ROADMAP): testIds whose generation the reviewer rejected (migration 067); populated by B3 later, declared here so the JSON column round-trips cleanly.
 ];
 
 // Fields whose canonical empty shape is an array, not null. Keeping them as
@@ -126,8 +126,8 @@ const INSERT_COLS = [
   "shardCoverageSummaries", // AUTO-009f: per-shard pre-aggregated coverage (migration 042)
   "changedFileRanges", // AUTO-009d: PR diff hunk ranges (migration 044)
   "prCoverageDiff", // AUTO-009d: PR-scoped coverage diff (migration 044)
-  "failureReason", // B1 (AUDIT-ROADMAP, migration 064): distinguishes ordinary failures from process-crash recoveries surfaced by `markOrphansInterrupted`.
-  "reviewRejectedTests", // B1 (AUDIT-ROADMAP, migration 064): JSON column declared here; populated by B3.
+  "failureReason", // B1 (AUDIT-ROADMAP, migration 067): distinguishes ordinary failures from process-crash recoveries surfaced by `markOrphansInterrupted`.
+  "reviewRejectedTests", // B1 (AUDIT-ROADMAP, migration 067): JSON column declared here; populated by B3.
 ];
 
 const INSERT_SQL = `INSERT INTO runs (${INSERT_COLS.join(", ")})

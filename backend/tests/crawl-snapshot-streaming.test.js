@@ -208,8 +208,16 @@ async function main() {
 
   // ── deleteByRunIds: batch purge across multiple runs ───────────────────
   await test("deleteByRunIds: batch delete across multiple runs", () => {
-    const r1 = makeRun(project.id);
-    const r2 = makeRun(project.id);
+    // Each run needs its own project — `idx_runs_one_active_per_project`
+    // (partial UNIQUE index from migration 002) enforces at most one
+    // status='running' run per projectId, so two `running` runs against
+    // the shared `project` would trip the constraint.
+    const p1 = makeProject();
+    const p2 = makeProject();
+    projectRepo.create(p1);
+    projectRepo.create(p2);
+    const r1 = makeRun(p1.id);
+    const r2 = makeRun(p2.id);
     runRepo.create(r1);
     runRepo.create(r2);
     crawlSnapshotRepo.save(r1.id, "https://example.com/r1-a", makeSnapshot("https://example.com/r1-a"));
