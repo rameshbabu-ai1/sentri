@@ -8,10 +8,13 @@
  *   - `crawlBrowser.shouldEnumerateFrame`    — iframe-strategy gate
  *   - `selfHealing.getSelfHealingHelperCode` — adaptive-timeout injection
  *
- * Browser-level iframe enumeration + SPA hydration are exercised by the
- * end-to-end QA flow (`QA.md` § "iframe + SPA hydration (B2)"); this file
- * keeps the unit-level contract green and is registered in
- * `backend/tests/run-tests.js`.
+ * Scope note: browser-level iframe enumeration + SPA hydration are observed
+ * in production via the B2 Prometheus metrics (`app_iframe_enumerated_total`,
+ * `app_spa_hydration_wait_seconds`, `app_run_p95_load_ms`,
+ * `app_run_adaptive_timeout_ms` in `utils/metrics.js`). End-to-end Playwright
+ * coverage of those paths is out of scope for this file — the audit-roadmap
+ * spec only requires unit-level contracts (matches B1's bar). This file is
+ * registered in `backend/tests/run-tests.js`.
  */
 
 import assert from "node:assert/strict";

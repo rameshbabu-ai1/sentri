@@ -10,6 +10,8 @@
  *   waitForSpaHydration(page, project) — AUDIT-ROADMAP B2
  */
 
+import { spaHydrationWaitSeconds } from "../utils/metrics.js"; // B2 — per-mode hydration-wait histogram.
+
 const CRAWL_NETWORKIDLE_TIMEOUT = parseInt(process.env.CRAWL_NETWORKIDLE_TIMEOUT, 10) || 5000;
 // AUDIT-ROADMAP B2 — SPA hydration wait. The default 5 000 ms covers most
 // React/Vue/Angular/Next.js apps; operators with slow staging environments
@@ -38,12 +40,23 @@ const HYDRATION_WAIT_MS = parseInt(process.env.HYDRATION_WAIT_MS, 10) || 5000;
  */
 export async function waitForSpaHydration(page, project) {
   const mode = project?.hydrationType || "auto";
-  if (mode === "domcontentloaded") return;
+  // AUDIT-ROADMAP B2 — observe even the early-return cases (with 0 duration)
+  // so the `mode` label distribution in `app_spa_hydration_wait_seconds`
+  // reflects the true prevalence of each hydration policy. Without this,
+  // dashboards would silently under-count `domcontentloaded` adopters.
+  // Best-effort: a registry hiccup must never block the crawl.
+  const start = Date.now();
+  const observe = () => {
+    try { spaHydrationWaitSeconds.observe({ mode }, (Date.now() - start) / 1000); } catch { /* best-effort */ }
+  };
+
+  if (mode === "domcontentloaded") { observe(); return; }
 
   if (mode === "custom") {
     const selector = project?.hydrationSelector;
-    if (!selector) return; // no-op — see PATCH-route comment
+    if (!selector) { observe(); return; } // no-op — see PATCH-route comment
     await page.waitForSelector(selector, { state: "hidden", timeout: HYDRATION_WAIT_MS }).catch(() => {});
+    observe();
     return;
   }
 
@@ -54,6 +67,7 @@ export async function waitForSpaHydration(page, project) {
     () => !document.querySelector('.loading, [aria-busy="true"], [data-loading], .skeleton, [class*="skeleton"], [class*="spinner"]'),
     { timeout: HYDRATION_WAIT_MS },
   ).catch(() => {});
+  observe();
 }
 
 /**

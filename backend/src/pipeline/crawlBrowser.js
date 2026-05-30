@@ -21,6 +21,7 @@ import { launchBrowser } from "../runner/config.js";
 import { loadRobotsRules, isAllowed, loadSitemapUrls } from "../utils/robotsSitemap.js";
 import * as accessibilityViolationRepo from "../database/repositories/accessibilityViolationRepo.js";
 import { AxeBuilder } from "@axe-core/playwright";
+import { iframeEnumeratedTotal } from "../utils/metrics.js"; // B2 — per-strategy / per-outcome iframe enumeration counter.
 
 const MAX_PAGES = parseInt(process.env.CRAWL_MAX_PAGES, 10) || 30;
 const MAX_DEPTH = parseInt(process.env.CRAWL_MAX_DEPTH, 10) || 3;
@@ -132,11 +133,21 @@ async function enumerateFrameSnapshots(page, parentUrl, project, run) {
   let frames;
   try { frames = page.frames(); } catch { return { count: 0, skipped: 0, frameElements: [] }; }
 
+  // AUDIT-ROADMAP B2 — closed-set outcome enum for the
+  // `app_iframe_enumerated_total{strategy, outcome}` counter. See the
+  // metric's `help` string in `utils/metrics.js` for the semantics of each
+  // outcome. Counter increments are wrapped in try/catch so a registry
+  // hiccup never blocks the crawl.
+  const bumpIframe = (outcome) => {
+    try { iframeEnumeratedTotal.inc({ strategy, outcome }); } catch { /* best-effort */ }
+  };
+
   for (const frame of frames) {
     if (frame === page.mainFrame()) continue;
     const frameUrl = frame.url();
     if (!shouldEnumerateFrame(frameUrl, parentUrl, strategy, allowlist)) {
       skipped++;
+      bumpIframe("skipped_strategy");
       continue;
     }
     try {
@@ -166,6 +177,7 @@ async function enumerateFrameSnapshots(page, parentUrl, project, run) {
         }
       }
       count++;
+      bumpIframe("captured");
     } catch (err) {
       // Cross-origin DOM access throws SecurityError — the common case for
       // payment widgets, Intercom, etc. Surface as structured info rather
@@ -173,8 +185,10 @@ async function enumerateFrameSnapshots(page, parentUrl, project, run) {
       const msg = err?.message || String(err);
       if (msg.includes("SecurityError") || msg.includes("cross-origin")) {
         log(run, `⚠ Skipping cross-origin iframe: ${frameUrl}`);
+        bumpIframe("skipped_cross_origin");
       } else {
         logWarn(run, `iframe snapshot failed for ${frameUrl}: ${msg}`);
+        bumpIframe("error");
       }
       skipped++;
     }

@@ -55,7 +55,7 @@ import { writeArtifactBuffer } from "./utils/objectStorage.js";
 import fs from "fs";
 import { recordMetric } from "./utils/recordMetric.js";
 import { isNonExecutedSkip } from "./utils/skipReasons.js";
-import { testsExecutedTotal, testDurationSeconds, recordRunOutcome } from "./utils/metrics.js"; // INF-007 — per-test + per-run telemetry.
+import { testsExecutedTotal, testDurationSeconds, recordRunOutcome, runP95LoadMs as runP95LoadMsGauge, runAdaptiveTimeoutMs as runAdaptiveTimeoutMsGauge } from "./utils/metrics.js"; // INF-007 — per-test + per-run telemetry; B2 adds p95 + adaptive-timeout gauges. Imported with `…Gauge` suffix so the gauge identifier doesn't shadow the local `runP95LoadMs` variable used in the adaptive-timeout calc.
 
 
 /**
@@ -726,6 +726,24 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
     });
   }
   log(run, `⏱  Element timeout: ${adaptiveTimeout}ms${runP95LoadMs != null ? ` (p95LoadMs=${Math.round(runP95LoadMs)}ms × 2, clamped to [5000, ${MAX_ELEMENT_TIMEOUT}])` : ""}${Number.isInteger(project.elementTimeoutOverride) ? " (project override)" : ""}`);
+
+  // AUDIT-ROADMAP B2 — record per-project gauges so the operator dashboard
+  // can plot "p95 page-load time vs derived element timeout" over time and
+  // catch a sustained app-regression (rising p95) before the clamp ceiling
+  // saturates and tests start TIMEOUT-ing. Best-effort: metric-registry
+  // hiccups must never block the test loop. `source` label mirrors the
+  // structured log above so dashboards can split operator-override from
+  // adaptive vs default. `projectId` cardinality is bounded by the project
+  // count — same convention as `app_vision_heal_budget_exhausted_total`.
+  try {
+    if (runP95LoadMs != null) {
+      runP95LoadMsGauge.set({ projectId: project.id }, Math.round(runP95LoadMs));
+    }
+    const source = Number.isInteger(project.elementTimeoutOverride)
+      ? "project_override"
+      : (runP95LoadMs != null ? "adaptive" : "default");
+    runAdaptiveTimeoutMsGauge.set({ projectId: project.id, source }, adaptiveTimeout);
+  } catch { /* best-effort */ }
 
   const allVideoSegments = [];
   // CAP-002 Phase 2 — per-shard stat accumulators. The worker composes the
