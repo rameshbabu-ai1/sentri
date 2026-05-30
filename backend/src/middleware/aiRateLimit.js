@@ -15,6 +15,15 @@ function parsePositiveEnv(name, fallback, min = 1, max = 10000) {
 /**
  * Return the default AI-route cost for a request.
  *
+ * The middleware is mounted POST-only at `backend/src/index.js` via
+ * `app.post(aiMutationPaths, ...)`, so in production this function only ever
+ * sees `req.method === "POST"` and the `return 1` branch is unreachable on
+ * the live request path. The branch is kept as defence-in-depth: if a future
+ * caller mounts the limiter more broadly (e.g. `app.use(...)` on the same
+ * paths) or wires it under a different router, non-POST requests must still
+ * pass `cost >= 1` to satisfy `incrWithExpiry`'s contract. Callers wiring a
+ * custom limiter scope can supply their own `costFn` to override the default.
+ *
  * @param {Object} req
  * @returns {number}
  */

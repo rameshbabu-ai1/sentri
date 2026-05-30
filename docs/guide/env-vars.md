@@ -151,7 +151,7 @@ The B3.7 spend-cap path can deliver a Slack-compatible webhook payload to `works
 | `MAX_WORKERS` | `2` | Global concurrency limit for BullMQ run execution (INF-003). Each slot processes one crawl or test run at a time. Ignored when Redis/BullMQ is not available. **Superseded by `WORKER_CONCURRENCY`** — kept as a fallback for backward compatibility |
 | `WORKER_CONCURRENCY` | `2` | Per-container concurrency for the BullMQ run worker (AUTO-008). Used by both the in-process worker started by the backend and the standalone `worker` Compose service (`node src/worker.js`). Falls back to `MAX_WORKERS` when unset |
 | `AI_RATE_LIMIT_PER_MIN` | `300` | Per-workspace AI route budget in cost units per minute. AI mutation calls cost 10 units, so the default allows 30 AI calls/min/workspace |
-| ~~`AI_RATE_LIMIT_REGULAR_PER_MIN`~~ | _ignored_ | **Deprecated** — the limiter now uses a single cap (`AI_RATE_LIMIT_PER_MIN`) with cost-weighted increments. Setting this var has no effect; both AI and regular calls draw from the single bucket. |
+| ~~`AI_RATE_LIMIT_REGULAR_PER_MIN`~~ | _ignored_ | **Deprecated** — the limiter is POST-only and scoped to the 5 AI mutation routes (`/chat`, `/projects/:id/crawl`, `/projects/:id/tests/generate`, `/tests/:testId/fix`, `/settings/agent-roles/:role/test`). Non-AI routes (GET / PATCH / DELETE / auth / SSE / `/health`) bypass the limiter entirely. Setting this var has no effect. |
 | `AI_RATE_LIMIT_WINDOW_SEC` | `60` | Window length for the per-workspace AI limiter |
 
 #### Local Redis setup
