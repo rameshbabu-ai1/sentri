@@ -6,7 +6,7 @@
 
 ---
 
-> **Heads up — AUTO-023 reframed.** The legacy "LangGraph-style DAG pipeline runner" framing is **retired**. AUTO-023 is now the 5-bundle multi-agent collaboration plan in [`docs/roadmap/autonomous-multi-agent.md`](./docs/roadmap/autonomous-multi-agent.md) (envelope schema → linear handoff → reviewer↔author loop → supervisor orchestrator → tool calling). The supervisor agent (Bundle 4) is a strictly more powerful version of the DAG runner — flow control is decided by an LLM reading a structured thread, not hardcoded if/else. Migration 058's Oracle + Reviewer flags remain valid scaffolding for both framings. Bundle 1 is purely additive and parallelisable with AUTO-014 — no shared files, no blocker dependency.
+> **AUTO-023 ✅ shipped.** The 5-bundle multi-agent collaboration plan in [`docs/roadmap/autonomous-multi-agent.md`](./docs/roadmap/autonomous-multi-agent.md) (envelope schema → linear handoff → reviewer↔author loop → supervisor orchestrator → tool calling) is fully delivered across PR #34–#38. The legacy "LangGraph-style DAG pipeline runner" framing is retired; the supervisor orchestrator (Bundle 4) supersedes it. See `ROADMAP.md` Completed Work Summary for the full shipped scope. **Do not re-list AUTO-023 in the queue.**
 >
 > **Agent-fulfillment rule:** items requiring a live LLM API key + multi-hour human review (e.g. **AUTO-022b** eval-harness recording) are **not agent-fulfillable** and stay deferred under § ⏭ Queue → "Deferred (human-only)". Agents must skip those items and promote the next agent-completable queue slot. The "Current PR" block at the top of this file is always the next agent-completable item.
 
@@ -138,20 +138,23 @@ Replace the cold-start-per-test Chromium launch pattern in `backend/src/testRunn
 ---
 ## ⏭ Queue
 
-> **Heads up:** **AUTO-014** is the current target (promoted from queue slot 3 after MNT-015 shipped in PR #1 — AUTO-022b stays deferred because it isn't agent-fulfillable). Remaining queue order: **AUTO-023** (multi-agent collaboration — 5-bundle plan, parallel-safe with AUTO-014) → **DIF-008** (Jira / Linear issue sync) → **SEC-005** (SAML / OIDC SSO federation). **AUTO-022b** stays as a deferred 🔴 Blocker that requires a human maintainer with an LLM API key — agents must skip it and pick the next agent-completable item. AUTO-023's legacy DAG-runner framing is retired; the supervisor orchestrator (Bundle 4) supersedes it. Original "AI platform foundation" track (AI-002 → AI-007) is fully shipped — see `ROADMAP.md` § Phase 5.
+> **Heads up:** **AUTO-014** is the current target (promoted from queue slot 3 after MNT-015 shipped in PR #1 — AUTO-022b stays deferred because it isn't agent-fulfillable). Remaining queue order: **DIF-008** (Jira / Linear issue sync) → **SEC-005** (SAML / OIDC SSO federation) → **AUTO-011** (anomaly detection) → **AUTO-021** (AI-generated test-suite health insights). **AUTO-022b** stays as a deferred 🔴 Blocker that requires a human maintainer with an LLM API key — agents must skip it and pick the next agent-completable item. **AUTO-023 (multi-agent collaboration) is fully shipped** — Bundles 1–5 landed across PR #34–#38 (see `ROADMAP.md` Completed Work Summary). Original "AI platform foundation" track (AI-002 → AI-007) is also fully shipped.
 
-### 1 · AUTO-023 — Autonomous multi-agent collaboration (5 bundles)
-**Effort:** XL (split across 5 bundles, each independently shippable) | **Priority:** 🟢 Strategic | **Dependencies:** INF-007 ✅ (OTel spans), `agent_events` ✅ (Task 2), `provider_routes` + `quotaGuard` + circuit breaker ✅ (PR #23), migration 058 ✅ (Oracle + Reviewer per-project flags), AI-005c single-agent collapse rule ✅. **Not blocked on AUTO-014.** | **Source:** [`docs/roadmap/autonomous-multi-agent.md`](./docs/roadmap/autonomous-multi-agent.md) (full plan, schema, exit criteria per bundle, cross-bundle invariants, risk register).
-
-Replaces the legacy DAG-runner framing. The new plan ships a real multi-agent system in 5 independently-shippable bundles: **B1** `agent_messages` schema + envelope validator + emitter (purely additive, zero behaviour change), **B2** wrap each pipeline call site with envelope read/write (still linear DAG, gated by `SENTRI_AGENT_MODE=envelope`), **B3** reviewer↔author feedback loop with structured `verdict ∈ {accept, revise, reject}` + bounded `MAX_REVIEW_ROUNDS`, **B4** supervisor orchestrator that reads the thread and decides next role (`SENTRI_AGENT_MODE=autonomous`, per-workspace opt-in), **B5** thread blackboard + closed-set tool registry (`db.listExistingTests`, `playwright.dryRun`, `thread.askPeer`). Every bundle preserves zero-regression default (`SENTRI_AGENT_MODE=pipeline` = today's behaviour). The supervisor (B4) supersedes the DAG runner — flow control is LLM-driven, not hardcoded if/else.
-
-### 2 · DIF-008 — Jira / Linear issue sync
+### 1 · DIF-008 — Jira / Linear issue sync
 **Effort:** L | **Priority:** 🟢 Differentiator | **Dependencies:** FEA-001 ✅ (notification dispatch pattern) | **Source:** `ROADMAP.md` Phase 3 (DIF-008)
 Add `POST /api/integrations/jira` and `POST /api/integrations/linear` settings endpoints to store OAuth tokens; on test-run failure auto-create a bug ticket (screenshot + error + Playwright trace attached); sync pass/fail status back to the linked issue's status field.
 
-### 3 · SEC-005 — SAML / OIDC SSO federation
+### 2 · SEC-005 — SAML / OIDC SSO federation
 **Effort:** L | **Priority:** 🟢 Strategic | **Dependencies:** ACL-001 ✅ (workspaces required for per-workspace SSO) | **Source:** `ROADMAP.md` Phase 2 (SEC-005)
 Integrate `openid-client` for OIDC and `@node-saml/passport-saml` for SAML 2.0 so enterprise procurement teams can connect Okta / Azure AD / OneLogin / Ping. Per-workspace SSO config (metadata URL, client ID, certificate); auto-provision users on first SSO login; Settings → Authentication panel.
+
+### 3 · AUTO-011 — Historical trend analysis and anomaly detection
+**Effort:** M | **Priority:** 🔵 Medium | **Dependencies:** FEA-001 ✅ (notification dispatch for fired alerts) | **Source:** `ROADMAP.md` Phase 4 (AUTO-011)
+Add a rolling-mean + standard-deviation anomaly detector to the dashboard. Alert when pass rate drops more than a configurable threshold (default 15%) versus the prior 5-run baseline. Surface as a warning banner on the dashboard and include in run completion notifications.
+
+### 4 · AUTO-021 — AI-generated test-suite health insights
+**Effort:** S | **Priority:** 🔵 Medium | **Dependencies:** FEA-001 ✅ (notifications include insights in failure alerts) | **Source:** `ROADMAP.md` Phase 4 (AUTO-021)
+After each run, feed the quality analytics summary (failure categories, flaky tests, healing events, pass rate delta) to the LLM and generate a 3–5 sentence natural-language insight surfaced as an "AI Insights" card on the dashboard.
 
 ### Deferred (human-only) · AUTO-022b — Eval harness: record real LLM cache + first real baseline
 **Effort:** M (4–8h focused maintainer session) | **Priority:** 🔴 Blocker (deferred — needs LLM API key, **not agent-fulfillable**) | **Dependencies:** AUTO-022 ✅ PR #17 plumbing | **Source:** `ROADMAP.md` Phase 5 (AUTO-022b) + `docs/guide/eval-harness-record-goldens.md`
@@ -218,9 +221,10 @@ Items that do not overlap AUTO-014's changed files and can land in a separate PR
 
 | ID | Title | Effort | Priority | Shared files? |
 |----|-------|--------|----------|---------------|
-| AUTO-023 Bundle 1 | Multi-agent envelope schema + validator + emitter | M | 🟢 Strategic | None — purely additive `agent_messages` schema + emitter. |
 | DIF-008 | Jira / Linear issue sync | L | 🟢 Differentiator | None — `routes/settings.js`, `Settings.jsx`, new `utils/integrations.js` |
 | SEC-005 | SAML / OIDC SSO federation | L | 🟢 Strategic | None — `routes/auth.js`, `middleware/authenticate.js`, `Settings.jsx` (different tab) |
+| AUTO-011 | Historical trend analysis + anomaly detection | M | 🔵 Medium | None — `routes/dashboard.js`, new `utils/anomalyDetector.js`, `Dashboard.jsx` banner |
+| AUTO-021 | AI-generated test-suite health insights | S | 🔵 Medium | None — `routes/dashboard.js`, `Dashboard.jsx` AI Insights card |
 
 ---
 
