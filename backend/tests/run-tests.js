@@ -303,6 +303,10 @@ const files = [
   "tests/run-checkpoint.test.js",
   // B1.2 (AUDIT-ROADMAP Bundle 1) — write-batching queue durability contract.
   "tests/db-write-queue.test.js",
+  // B1.3 (AUDIT-ROADMAP Bundle 1) — crawl snapshot streaming + repo contract.
+  // Pins the (runId, url) UNIQUE idempotency, load-ms percentile feed for
+  // Bundle 2's adaptive timeout, and the purge-path delete primitives.
+  "tests/crawl-snapshot-streaming.test.js",
   "tests/run-worker-shard-retry.test.js",
   "tests/run-abort-pubsub.test.js",
   "tests/run-shard-crash.test.js",
