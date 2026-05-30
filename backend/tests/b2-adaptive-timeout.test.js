@@ -62,13 +62,23 @@ function main() {
     // For [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000] the rank is
     // 0.95 * (10 - 1) = 8.55 — between index 8 (900) and 9 (1000),
     // interpolated: 900 + (1000 - 900) * 0.55 = 955.
+    // Tolerate IEEE-754 drift: `100 * 0.55 + 900` produces 954.9999999999999
+    // on x64 / arm64. Industry-standard percentile consumers (Prometheus
+    // `histogram_quantile`, NumPy, Postgres) all accept sub-millisecond
+    // float noise — the production callsite at `testRunner.js#computeAdaptiveElementTimeout`
+    // immediately `Math.round`s the value before clamping, so the drift
+    // never reaches the runtime.
     const values = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000];
-    assert.equal(p95(values), 955);
+    const result = p95(values);
+    assert.ok(Math.abs(result - 955) < 1e-9,
+      `expected p95 ≈ 955 within 1e-9 tolerance, got ${result}`);
   });
 
   test("p95: sorts input before computing (insensitive to caller order)", () => {
     const shuffled = [500, 100, 900, 300, 700, 200, 800, 400, 1000, 600];
-    assert.equal(p95(shuffled), 955);
+    const result = p95(shuffled);
+    assert.ok(Math.abs(result - 955) < 1e-9,
+      `expected sorted p95 ≈ 955 within 1e-9 tolerance, got ${result}`);
   });
 
   // ── computeAdaptiveElementTimeout — `2 * p95` clamped to [floor, ceil] ─

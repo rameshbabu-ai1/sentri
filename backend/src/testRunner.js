@@ -414,7 +414,11 @@ export function p95(values) {
  * @returns {number} ms — always finite, always within `[floor, ceiling]`.
  */
 export function computeAdaptiveElementTimeout(p95LoadMs, opts = {}) {
-  const floor = Number.isFinite(opts.floor) ? opts.floor : 5000;
+  // Floor tracks the runtime `HEALING_ELEMENT_TIMEOUT` env var (default 5000)
+  // so an operator who raises it to e.g. 8000 for a slow enterprise app sees
+  // the adaptive floor honour that setting rather than undershooting it.
+  const envFloor = parseInt(process.env.HEALING_ELEMENT_TIMEOUT, 10) || 5000;
+  const floor = Number.isFinite(opts.floor) ? opts.floor : envFloor;
   const ceiling = Number.isFinite(opts.ceiling) ? opts.ceiling : MAX_ELEMENT_TIMEOUT;
   if (!Number.isFinite(p95LoadMs) || p95LoadMs <= 0) return floor;
   const candidate = Math.round(p95LoadMs * 2);
@@ -705,8 +709,29 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
       runId, source: "project_override", elementTimeout: adaptiveTimeout,
     });
   } else {
+    // Precedence inside the adaptive branch:
+    //   (a) `crawl_snapshots.loadMs` rows under THIS runId — populated when
+    //       the current run is itself a crawl, OR when an upstream stage of
+    //       a generate/recorder pipeline streamed snapshots under the same
+    //       runId.
+    //   (b) `crawl_snapshots.loadMs` rows from the project's most recent
+    //       crawl run — the regression-run path. A regression run gets a
+    //       brand-new `runId` (`routes/runs.js:225`) distinct from any
+    //       previous crawl's runId, so (a) returns `[]` for every test_run.
+    //       Without this fallback the adaptive math would be inert on the
+    //       most common runtime path: someone clicking Run Regression on a
+    //       project that already has a crawl history.
+    //
+    // The fallback's data freshness is bounded by "most recent crawl that
+    // actually recorded loadMs"; an operator who configures
+    // `iframeStrategy: 'none'` and never crawls again will see stale p95
+    // values until they re-crawl. That's the correct behaviour — `loadMs`
+    // is a property of the SUT's navigation timing, not of the test run.
     try {
-      const loadTimes = crawlSnapshotRepo.getLoadTimesByRunId(runId);
+      let loadTimes = crawlSnapshotRepo.getLoadTimesByRunId(runId);
+      if (loadTimes.length === 0 && project?.id) {
+        loadTimes = crawlSnapshotRepo.getLoadTimesByProjectId(project.id);
+      }
       runP95LoadMs = p95(loadTimes);
       if (runP95LoadMs != null) {
         run.p95LoadMs = Math.round(runP95LoadMs);
