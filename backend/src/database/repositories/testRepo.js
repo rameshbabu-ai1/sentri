@@ -530,7 +530,15 @@ export function getByIdIncludeDeleted(id) {
 export function create(test) {
   const db = getDatabase();
   const row = testToRow(test, { fillDefaults: true });
-  if (!("dependsOn" in test)) row.dependsOn = null;
+  // AUTO-014: legacy rows persist `null` when no dependencies are declared
+  // (documented in `docs/api/tests.md`). The `in` operator returns `true`
+  // for keys with `undefined` values, so a bare `if (!("dependsOn" in test))`
+  // guard would NOT override `{ dependsOn: undefined }` — `testToRow` with
+  // `fillDefaults: true` then coerces undefined → `"[]"`, drifting the
+  // persisted shape away from the contract. Cover both the absent-key case
+  // AND the present-but-nullish case so every caller (route, BullMQ worker,
+  // future bulk-create) gets the same legacy-compatible default.
+  if (!("dependsOn" in test) || test.dependsOn == null) row.dependsOn = null;
   const params = {};
   for (const col of INSERT_COLS) {
     params[col] = row[col] !== undefined ? row[col] : null;
