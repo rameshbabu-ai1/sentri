@@ -16,7 +16,60 @@ Flag adjacent items as bundling candidates in your PR description rather than ex
 
 ---
 
-## ▶ Current PR — AUTO-014 — Test dependency and execution ordering
+## ▶ Current PR — DIF-008 — Jira / Linear issue sync
+**Effort:** L | **Priority:** 🟢 Differentiator | **Dependencies:** FEA-001 ✅ (notification dispatch pattern is the template — same outbound HTTP shape, same retry policy, same per-workspace scoping) | **Source:** `ROADMAP.md` Phase 3 (DIF-008). **Note:** AUTO-022b (eval-harness recording) stays deferred — not agent-fulfillable. DIF-008 is the next agent-completable item promoted from queue slot 1 after AUTO-014 shipped in PR #TBD.
+
+The traceability data model already stores `linkedIssueKey` and `tags` per test, but there is no outbound sync. When a test fails, no Jira / Linear ticket is automatically created and reviewers must manually correlate failures to issues. Add per-workspace OAuth-token storage for both providers, an outbound failure-sync hook in the run finalizer, and a status-back sync from issue close → test re-run.
+
+**Problem:** `linkedIssueKey` exists on every test row (since DIF-007 / FEA-001) but is reverse-only — operators paste a key in TestDetail and it links to an existing issue. The forward direction — "this test just failed, file a bug ticket attached to its trace" — has no plumbing. Three-way drift accumulates: failing tests stay un-ticketed, tickets stay open after the underlying test starts passing again, and a new ticket is filed every run for the same persistent failure.
+
+**Fix:**
+1. **Settings storage** — new `integrations` table with `{ workspaceId, provider, oauthAccessToken (AES-encrypted), oauthRefreshToken (AES-encrypted), expiresAt, projectKey, ... }`. Per-workspace, admin-only CRUD.
+2. **OAuth flows** — `GET /api/integrations/jira/auth` + `/linear/auth` redirect to the provider; callback handlers exchange the code, encrypt-and-persist the tokens, audit-log the install. Token refresh runs lazily on every API call.
+3. **Failure sync** — new `backend/src/utils/integrations.js` exports `syncFailureToIssue(test, run, failureResult)`. Called from `testRunner.js` after `finalizeRunIfNotAborted` for every failed result. Idempotent: looks up an existing open ticket for `(test.id, run.projectId)` first; bumps its comment count instead of opening a duplicate.
+4. **Status-back sync** — webhook receiver `POST /api/integrations/jira/webhook` + `/linear/webhook` listens for issue close events. When a linked issue closes, mark the test as "ready for re-test" via a new `pendingRetest` flag (surfaces as a chip in TestDetail).
+5. **UI** — Settings → Integrations tab with per-provider connect button, account chip, disconnect action. TestDetail surfaces the linked ticket with a deep link.
+
+**Files to change:**
+- `backend/src/database/migrations/NNN_integrations.sql` (new) — `integrations` table; `tests.pendingRetest` boolean column
+- `backend/src/database/repositories/integrationRepo.js` (new) — CRUD + token-refresh helper
+- `backend/src/utils/integrations.js` (new) — Jira + Linear API clients + `syncFailureToIssue` + `syncStatusBack`
+- `backend/src/routes/integrations.js` (new) — OAuth init/callback, webhook receivers, manual disconnect
+- `backend/src/middleware/permissions.json` — register the new admin-gated routes
+- `backend/src/testRunner.js` — call `syncFailureToIssue` for each failed result after finalize
+- `frontend/src/pages/Settings.jsx` — Integrations tab (per-provider connect + status)
+- `frontend/src/pages/TestDetail.jsx` — render linked-issue chip with provider deep link + "Re-test pending" badge when `pendingRetest`
+- `frontend/src/api.js` — `getIntegrations`, `connectIntegration`, `disconnectIntegration` helpers
+- `backend/tests/integrations-routes.test.js` (new) — OAuth callback happy path, encrypted token round-trip, webhook signature verification, cross-workspace ACL
+- `backend/tests/integrations-sync.test.js` (new) — `syncFailureToIssue` happy path, idempotency on repeated failure, status-back close flips `pendingRetest`
+- `backend/tests/run-tests.js` — register both new test files
+- `docs/changelog.md` — `## [Unreleased]` § Added
+- `docs/api/integrations.md` (new) — operator guide for OAuth setup + webhook URL configuration
+- `QA.md` — new "Jira / Linear issue sync (DIF-008)" section
+
+**Acceptance criteria:**
+- An admin can complete the Jira OAuth flow from Settings → Integrations and the access token is AES-encrypted at rest (verified by direct DB read).
+- A failed test in a regression run auto-creates one Jira / Linear ticket with the screenshot, error message, and Playwright trace ZIP attached.
+- A second failure of the same test against the same project does NOT create a second ticket — it appends a comment to the open ticket (idempotency).
+- Closing the linked issue via webhook flips `tests.pendingRetest = true` and surfaces a "Re-test pending" badge on TestDetail.
+- Cross-workspace ACL preserved — workspace A admin cannot read workspace B's integration tokens via any endpoint.
+- Disconnecting an integration zeroes the encrypted tokens and emits an `integration.disconnected` audit row (SEC-007 hash chain).
+
+### PR checklist (DIF-008)
+- [ ] PR title follows Conventional Commits (`feat(integrations): DIF-008 — Jira / Linear issue sync`)
+- [ ] Branch is off `develop`, not `main`
+- [ ] `cd backend && npm test` passes locally (incl. new `integrations-routes.test.js` + `integrations-sync.test.js`)
+- [ ] `cd frontend && npm run build && npm test` passes locally
+- [ ] OAuth tokens AES-encrypted at rest via `credentialEncryption.js`
+- [ ] Webhook signature verification enforced (HMAC-SHA256 against `INTEGRATIONS_WEBHOOK_SECRET`)
+- [ ] Idempotent failure sync verified — repeated failures append comments, never duplicate tickets
+- [ ] `docs/changelog.md` updated under `## [Unreleased]` § Added
+- [ ] `QA.md` § "Jira / Linear issue sync (DIF-008)" landed
+- [ ] ROADMAP.md `### DIF-008` flipped to `**Status:** ✅ Complete (PR #N)` and Completed Work Summary row added
+
+<details>
+<summary>Archived: previous Current PR — AUTO-014 — Test dependency and execution ordering (✅ shipped in PR #TBD)</summary>
+
 **Effort:** M | **Priority:** 🔵 Medium | **Dependencies:** MNT-015 ✅ PR #1 (browser pool — per-test dispatch loop already flows through `browserPool.acquire`; topological sort feeds the same loop) | **Source:** `ROADMAP.md` Phase 4 (AUTO-014). **Note:** AUTO-022b (eval-harness recording) stays in the queue but is **not agent-fulfillable** — it requires a live LLM API key + 4–8h of focused per-case recording that only a human maintainer can drive. AUTO-014 is the next agent-completable item.
 
 Add explicit per-test `dependsOn: [testId, ...]` declarations so prerequisite tests (login → create record → edit record → delete record) execute in topological order. Downstream tests auto-skip when an upstream blocker fails (`skipReason: "upstream_failed"` marker, surfaced in run results + RunDetail UI). Circular declarations (`A → B → A`) are rejected at save time with a structured 400 error. Smoke-pin (AUTO-001) keeps priority over `dependsOn` — smoke tests still dispatch first; dependencies only constrain ordering *within* the non-smoke tail.
@@ -72,8 +125,10 @@ Add explicit per-test `dependsOn: [testId, ...]` declarations so prerequisite te
 - [ ] `QA.md` § "Test dependency ordering (AUTO-014)" landed
 - [ ] ROADMAP.md `### AUTO-014` section flipped to `**Status:** ✅ Complete (PR #N)` and Completed Work Summary row added
 
+</details>
+
 <details>
-<summary>Archived: previous Current PR — MNT-015 — Browser pool reuse + per-tenant AI rate limiting (✅ shipped in PR #1)</summary>
+<summary>Archived: prior Current PR — MNT-015 — Browser pool reuse + per-tenant AI rate limiting (✅ shipped in PR #1)</summary>
 
 **Effort:** M | **Priority:** 🟡 High | **Dependencies:** INF-007 ✅ (metrics to measure pool hit/miss rate), INF-009 ✅ (PR #30 — graceful-shutdown plumbing the pool will hook into) | **Source:** `ROADMAP.md` Phase 5 (MNT-015) — formerly `PERF-001` in AUDIT_IMPL.md. **Note:** AUTO-023 (now reframed as the multi-agent collaboration plan — see [`docs/roadmap/autonomous-multi-agent.md`](./docs/roadmap/autonomous-multi-agent.md)) is **no longer blocked on MNT-015**; the two tracks are parallel-safe. MNT-015 remains valuable for `playwright.dryRun` tool latency in AUTO-023 Bundle 5, but is not a prerequisite.
 
@@ -138,21 +193,17 @@ Replace the cold-start-per-test Chromium launch pattern in `backend/src/testRunn
 ---
 ## ⏭ Queue
 
-> **Heads up:** **AUTO-014** is the current target (promoted from queue slot 3 after MNT-015 shipped in PR #1 — AUTO-022b stays deferred because it isn't agent-fulfillable). Remaining queue order: **DIF-008** (Jira / Linear issue sync) → **SEC-005** (SAML / OIDC SSO federation) → **AUTO-011** (anomaly detection) → **AUTO-021** (AI-generated test-suite health insights). **AUTO-022b** stays as a deferred 🔴 Blocker that requires a human maintainer with an LLM API key — agents must skip it and pick the next agent-completable item. **AUTO-023 (multi-agent collaboration) is fully shipped** — Bundles 1–5 landed across PR #34–#38 (see `ROADMAP.md` Completed Work Summary). Original "AI platform foundation" track (AI-002 → AI-007) is also fully shipped.
+> **Heads up:** **DIF-008** is the current target (promoted from queue slot 1 after AUTO-014 shipped in PR #TBD — AUTO-022b stays deferred because it isn't agent-fulfillable). Remaining queue order: **SEC-005** (SAML / OIDC SSO federation) → **AUTO-011** (anomaly detection) → **AUTO-021** (AI-generated test-suite health insights). **AUTO-022b** stays as a deferred 🔴 Blocker that requires a human maintainer with an LLM API key — agents must skip it and pick the next agent-completable item. **AUTO-023 (multi-agent collaboration) is fully shipped** — Bundles 1–5 landed across PR #34–#38 (see `ROADMAP.md` Completed Work Summary). Original "AI platform foundation" track (AI-002 → AI-007) is also fully shipped.
 
-### 1 · DIF-008 — Jira / Linear issue sync
-**Effort:** L | **Priority:** 🟢 Differentiator | **Dependencies:** FEA-001 ✅ (notification dispatch pattern) | **Source:** `ROADMAP.md` Phase 3 (DIF-008)
-Add `POST /api/integrations/jira` and `POST /api/integrations/linear` settings endpoints to store OAuth tokens; on test-run failure auto-create a bug ticket (screenshot + error + Playwright trace attached); sync pass/fail status back to the linked issue's status field.
-
-### 2 · SEC-005 — SAML / OIDC SSO federation
+### 1 · SEC-005 — SAML / OIDC SSO federation
 **Effort:** L | **Priority:** 🟢 Strategic | **Dependencies:** ACL-001 ✅ (workspaces required for per-workspace SSO) | **Source:** `ROADMAP.md` Phase 2 (SEC-005)
 Integrate `openid-client` for OIDC and `@node-saml/passport-saml` for SAML 2.0 so enterprise procurement teams can connect Okta / Azure AD / OneLogin / Ping. Per-workspace SSO config (metadata URL, client ID, certificate); auto-provision users on first SSO login; Settings → Authentication panel.
 
-### 3 · AUTO-011 — Historical trend analysis and anomaly detection
+### 2 · AUTO-011 — Historical trend analysis and anomaly detection
 **Effort:** M | **Priority:** 🔵 Medium | **Dependencies:** FEA-001 ✅ (notification dispatch for fired alerts) | **Source:** `ROADMAP.md` Phase 4 (AUTO-011)
 Add a rolling-mean + standard-deviation anomaly detector to the dashboard. Alert when pass rate drops more than a configurable threshold (default 15%) versus the prior 5-run baseline. Surface as a warning banner on the dashboard and include in run completion notifications.
 
-### 4 · AUTO-021 — AI-generated test-suite health insights
+### 3 · AUTO-021 — AI-generated test-suite health insights
 **Effort:** S | **Priority:** 🔵 Medium | **Dependencies:** FEA-001 ✅ (notifications include insights in failure alerts) | **Source:** `ROADMAP.md` Phase 4 (AUTO-021)
 After each run, feed the quality analytics summary (failure categories, flaky tests, healing events, pass rate delta) to the LLM and generate a 3–5 sentence natural-language insight surfaced as an "AI Insights" card on the dashboard.
 
@@ -217,12 +268,11 @@ Activate the dormant AUTO-022 regression gate by replacing the 50 synthetic gold
 
 ## 🔀 Parallel opportunities
 
-Items that do not overlap AUTO-014's changed files and can land in a separate PR while it is in flight. AUTO-014 touches `backend/src/database/migrations/NNN_test_depends_on.sql` (new), `backend/src/database/repositories/testRepo.js`, `backend/src/routes/tests.js`, `backend/src/runner/dependencyOrder.js` (new), `backend/src/testRunner.js` (dispatch order + skip cascade), `backend/src/utils/skipReasons.js`, `frontend/src/utils/dependencyGraph.js` (new), `frontend/src/pages/TestDetail.jsx`, `frontend/src/pages/RunDetail.jsx`. Any PR touching the per-test dispatch order, `testRepo` column list, or the test-detail / run-detail UI will conflict and should serialise.
+Items that do not overlap DIF-008's changed files and can land in a separate PR while it is in flight. DIF-008 touches `backend/src/database/migrations/NNN_integrations.sql` (new), `backend/src/database/repositories/integrationRepo.js` (new), `backend/src/utils/integrations.js` (new), `backend/src/routes/integrations.js` (new), `backend/src/middleware/permissions.json`, `backend/src/testRunner.js` (failure-sync hook), `frontend/src/pages/Settings.jsx` (Integrations tab), `frontend/src/pages/TestDetail.jsx` (linked-issue chip), `frontend/src/api.js`. Any PR touching `Settings.jsx`, the run finalizer, or the test-detail sidebar will conflict and should serialise.
 
 | ID | Title | Effort | Priority | Shared files? |
 |----|-------|--------|----------|---------------|
-| DIF-008 | Jira / Linear issue sync | L | 🟢 Differentiator | None — `routes/settings.js`, `Settings.jsx`, new `utils/integrations.js` |
-| SEC-005 | SAML / OIDC SSO federation | L | 🟢 Strategic | None — `routes/auth.js`, `middleware/authenticate.js`, `Settings.jsx` (different tab) |
+| SEC-005 | SAML / OIDC SSO federation | L | 🟢 Strategic | ⚠️ Partial — `Settings.jsx` (different tab); `routes/auth.js` + `middleware/authenticate.js` are independent |
 | AUTO-011 | Historical trend analysis + anomaly detection | M | 🔵 Medium | None — `routes/dashboard.js`, new `utils/anomalyDetector.js`, `Dashboard.jsx` banner |
 | AUTO-021 | AI-generated test-suite health insights | S | 🔵 Medium | None — `routes/dashboard.js`, `Dashboard.jsx` AI Insights card |
 
@@ -232,12 +282,9 @@ Items that do not overlap AUTO-014's changed files and can land in a separate PR
 
 | ID | Title | PR |
 |----|-------|----|
+| AUTO-014 | Test dependency and execution ordering — per-test `dependsOn` JSON (migration 068), `runner/dependencyOrder.js` (Kahn topo sort + cycle DFS + cascade BFS), serial-mode forcing when deps declared, `upstream_failed`/`missing_upstream` skip reasons excluded from pass-rate denominator, TestDetail multi-select + RunDetail badges. | #TBD |
 | B1 (AUDIT-ROADMAP Bundle 1) | Run persistence + crash recovery — `run_test_results` per-test flush (migration 065), `crawl_snapshots` streaming (066), tiered-durability `dbWriteQueue`, admin-only `POST /runs/:id/resume`, RunDetail Resume button. | #N |
 | MNT-015 | Browser pool reuse + per-tenant cost-weighted AI rate limiting — warm Playwright pool with FIFO waiter queue, per-workspace AI limiter (`workspaceId:ai`), IETF `RateLimit-*` headers, graceful-shutdown drain. | #1 |
-| AUTO-023 | Autonomous multi-agent collaboration — Bundle 5/5: closed-set tool registry, thread-scoped blackboard (migration 063), envelope-mediated dispatch, peer Q&A, sliding-window rate limit, AbortSignal wiring. | #38 |
-| INF-009 | Helm chart + K8s readiness/liveness probes + disaster-recovery playbook — backend/worker Deployments, Postgres StatefulSet, worker `/healthz`, nightly `pg_dump` to S3, `kubeconform --strict` CI gate. | #30 |
-| AUTO-009 | Browser code coverage mapping (MVP + AUTO-009b/c/d/f/g/h/i/j) — V8 capture, source-map resolution, PR-scoped diff, 4 quality gates, server-side Istanbul coverage, regression alerting, retention sweep. | #19 |
-| MNT-001 + AUTO-022 | Vision-based locator healing (pixelmatch CV + LLM vision stages 7/8, per-project budget circuit-breaker, baseline crop capture) **plus** AI eval harness plumbing (Levenshtein scorer, 50-case goldens, `EvalPanel`). | #17 |
 
 
 *Full completed list → ROADMAP.md § Completed Work Summary*
