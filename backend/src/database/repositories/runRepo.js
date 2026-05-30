@@ -54,6 +54,7 @@ const JSON_FIELDS = [
   "shardCoverageSummaries", // AUTO-009f: per-shard pre-aggregated coverage (migration 042) — sparse array indexed by shardIndex; merged into `coverageSummary` by the boundary-crossing finalizer.
   "changedFileRanges", // AUTO-009d: per-file head-side line ranges from the PR diff (migration 044)
   "prCoverageDiff", // AUTO-009d: PR-scoped coverage diff output from computePrCoverage (migration 044)
+  "reviewRejectedTests", // B1 (AUDIT-ROADMAP): testIds whose generation the reviewer rejected (migration 064); populated by B3 later, declared here so the JSON column round-trips cleanly.
 ];
 
 // Fields whose canonical empty shape is an array, not null. Keeping them as
@@ -62,7 +63,7 @@ const JSON_FIELDS = [
 // never blow up on a pre-AUTO-010 run). Hoisted to module scope so bulk
 // reads (e.g. `getWithResultsByProjectIds` on the dashboard) don't allocate
 // a fresh Set per row.
-const ARRAY_DEFAULT_FIELDS = new Set(["tests", "results", "videoSegments", "pages", "rootCauses"]);
+const ARRAY_DEFAULT_FIELDS = new Set(["tests", "results", "videoSegments", "pages", "rootCauses", "reviewRejectedTests"]);
 
 function rowToRun(row) {
   if (!row) return undefined;
@@ -125,6 +126,8 @@ const INSERT_COLS = [
   "shardCoverageSummaries", // AUTO-009f: per-shard pre-aggregated coverage (migration 042)
   "changedFileRanges", // AUTO-009d: PR diff hunk ranges (migration 044)
   "prCoverageDiff", // AUTO-009d: PR-scoped coverage diff (migration 044)
+  "failureReason", // B1 (AUDIT-ROADMAP, migration 064): distinguishes ordinary failures from process-crash recoveries surfaced by `markOrphansInterrupted`.
+  "reviewRejectedTests", // B1 (AUDIT-ROADMAP, migration 064): JSON column declared here; populated by B3.
 ];
 
 const INSERT_SQL = `INSERT INTO runs (${INSERT_COLS.join(", ")})
@@ -1246,17 +1249,46 @@ export function findLatestResultForTest(testId) {
 
 /**
  * Mark all "running" non-deleted runs as "interrupted" (orphan recovery on startup).
- * @returns {number} Number of runs marked.
+ *
+ * B1 (AUDIT-ROADMAP) — Also stamps `failureReason = 'process_crash'` so the
+ * resume endpoint (`POST /runs/:runId/resume`) and CI consumers can
+ * distinguish a SIGKILL / OOM kill from a user-initiated abort or an
+ * ordinary test failure. The existing `status = 'interrupted'` transition
+ * is preserved bit-for-bit (frontend `pipelineState.js` treats it as
+ * terminal alongside `failed` / `aborted`); `failureReason` is purely
+ * additive metadata. Pre-B1 rows have `failureReason = NULL` which the
+ * resume gate treats as "not crash-recovered".
+ *
+ * @returns {{ count: number, ids: string[] }} count of rows marked + their
+ *   IDs. IDs are returned so callers (e.g. the boot-time hook in
+ *   `index.js`) can log + enqueue resume jobs for crash-recovered runs.
  */
 export function markOrphansInterrupted() {
   const db = getDatabase();
   const now = new Date().toISOString();
-  const info = db.prepare(
-    `UPDATE runs SET status = 'interrupted', finishedAt = COALESCE(finishedAt, ?),
-     error = 'Server restarted while run was in progress'
-     WHERE status = 'running' AND deletedAt IS NULL`
-  ).run(now);
-  return info.changes;
+  // Snapshot the orphan IDs BEFORE the UPDATE so we can return them — once
+  // the predicate `status = 'running'` no longer matches, a later SELECT
+  // would miss them. Both statements run inside a transaction so a
+  // concurrent run creation between SELECT and UPDATE cannot leak into
+  // the returned ID set.
+  const ids = [];
+  db.transaction(() => {
+    const rows = db.prepare(
+      "SELECT id FROM runs WHERE status = 'running' AND deletedAt IS NULL"
+    ).all();
+    for (const r of rows) ids.push(r.id);
+    if (ids.length > 0) {
+      db.prepare(
+        `UPDATE runs
+            SET status = 'interrupted',
+                finishedAt = COALESCE(finishedAt, ?),
+                error = 'Server restarted while run was in progress',
+                failureReason = COALESCE(failureReason, 'process_crash')
+          WHERE status = 'running' AND deletedAt IS NULL`
+      ).run(now);
+    }
+  })();
+  return { count: ids.length, ids };
 }
 
 // ─── Recycle bin ─────────────────────────────────────────────────────────────

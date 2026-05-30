@@ -157,10 +157,14 @@ migrateFromJsonIfNeeded();
 // 3. Restore persisted AI provider keys from the database into the runtime cache.
 //    Must run after DB init but before the first AI call.
 loadKeysFromDatabase();
-// 4. Orphan recovery — mark any "running" runs from a previous crash as interrupted
-const orphanCount = runRepo.markOrphansInterrupted();
-if (orphanCount > 0) {
-  console.warn(formatLogLine("warn", null, `[db] Marked ${orphanCount} orphaned run(s) as interrupted`));
+// 4. Orphan recovery — mark any "running" runs from a previous crash as interrupted.
+// B1 (AUDIT-ROADMAP): `markOrphansInterrupted` now also stamps
+// `failureReason='process_crash'` and returns the recovered IDs so we can
+// surface them in the structured log (operators can correlate with
+// `POST /runs/:runId/resume` requests).
+const orphanResult = runRepo.markOrphansInterrupted();
+if (orphanResult.count > 0) {
+  console.warn(formatLogLine("warn", null, `[db] Marked ${orphanResult.count} orphaned run(s) as interrupted (process_crash) — resume available: ${orphanResult.ids.join(", ")}`));
 }
 // 5. Ensure every user has a workspace (ACL-001 backfill for existing data).
 //    Must run after DB init + migrations so the workspaces table exists.
