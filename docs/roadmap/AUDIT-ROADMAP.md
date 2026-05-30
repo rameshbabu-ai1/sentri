@@ -675,7 +675,7 @@ persisted immediately)
 
 ### Bundle 5 (B5) — Test dependency ordering (AUTO-014 — current PR) 🟡 P1
 
-**Status:** 🔲 Planned (current PR per NEXT.md) | **Effort:** M |
+**Status:** ✅ Complete | **Effort:** M |
 **Source:** ROADMAP.md Phase 4 (AUTO-014)
 
 > **This is the item already specified in NEXT.md as the current sprint
@@ -1223,12 +1223,12 @@ collapsed), AUTO-023 ✅ (oracle agent role + tool registry), AUTO-009 ✅
 | B2 — iframe + adaptive timeouts + SPA | RLY-006, RLY-009 | 🔴 P0 | L | ✅ Complete (this PR) |
 | B3 — Reviewer independence + escalation | RLY-003, QAL-004 | 🔴 P0 | M | 🔲 Planned |
 | B4 — Auth recovery + target-app TOTP | RLY-004, SCL-001 | 🔴 P0 | M | 🔲 Planned |
-| B5 — Test dependency ordering | AUTO-014 | 🟡 P1 | M | 🔲 Current PR |
+| B5 — Test dependency ordering | AUTO-014 | 🟡 P1 | M | ✅ Complete |
 | B6 — Test quality gates | QAL-001, QAL-005, QAL-002, QAL-010 | 🟡 P1 | XL | 🔲 Planned |
 | B7 — Healing safety + context robustness | QAL-006, QAL-007, QAL-008, QAL-009, QAL-011 | 🟡 P1 | L | 🔲 Planned |
 | B8 — Goal-based autonomy + coverage | GOL-001, SCL-004, AUTO-011, AUTO-021 | 🟢 Strategic | XL | 🔲 Planned |
 
-**Totals — Phase 6:** ✅ Done: 2 (B1 — 3 sub-items, B2 — 2 sub-items) · 🔲 Pending: 6 bundles (23 sub-items, includes QAL-011 added under B7 by B2)
+**Totals — Phase 6:** ✅ Done: 3 (B1 — 3 sub-items, B2 — 2 sub-items, B5 — 1 sub-item) · 🔲 Pending: 5 bundles (22 sub-items, includes QAL-011 added under B7 by B2)
 
 ---
 
