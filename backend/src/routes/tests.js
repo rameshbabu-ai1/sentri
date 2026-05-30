@@ -1193,10 +1193,4 @@ router.delete("/tests/:testId/baselines/:stepNumber", requireRole("qa_lead"), (r
 // All recorder routes MOVED to `backend/src/routes/recorder.js`.
 // Mounted alongside this router in `backend/src/index.js`.
 
-
-
-
-
-
-
 export default router;

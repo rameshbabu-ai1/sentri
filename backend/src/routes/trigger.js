@@ -19,7 +19,7 @@
 import { Router } from "express";
 import crypto from "node:crypto";
 import * as runRepo from "../database/repositories/runRepo.js";
-import * as environmentRepo from "../database/repositories/environmentRepo.js";
+import { resolveEnvOrThrow } from "../utils/routeHelpers.js";
 import * as testRepo from "../database/repositories/testRepo.js";
 import * as webhookTokenRepo from "../database/repositories/webhookTokenRepo.js";
 import * as githubCheckSettingsRepo from "../database/repositories/githubCheckSettingsRepo.js";
@@ -432,10 +432,11 @@ async function resolveChangedFiles(project, body, runId) {
 async function handleTrigger(req, res) {
   const { triggerToken: tokenRow, triggerProject: project } = req;
 
-  const environmentId = req.body?.environmentId || null;
-  const environment = environmentId ? environmentRepo.getById(environmentId) : null;
-  if (environmentId && (!environment || environment.projectId !== project.id)) {
-    return res.status(400).json({ error: "invalid environmentId" });
+  let environment;
+  try {
+    environment = resolveEnvOrThrow(req.body?.environmentId, project);
+  } catch (err) {
+    return res.status(err.httpStatus || 400).json({ error: err.message });
   }
 
   // ── 3. Extract and validate optional config (async) ────────────────
