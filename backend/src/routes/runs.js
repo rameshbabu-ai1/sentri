@@ -19,6 +19,7 @@
  */
 
 import { Router } from "express";
+import { getDatabase } from "../database/sqlite.js";
 import * as projectRepo from "../database/repositories/projectRepo.js";
 import * as runRepo from "../database/repositories/runRepo.js";
 import * as runTestResultRepo from "../database/repositories/runTestResultRepo.js";
@@ -800,21 +801,29 @@ router.post("/runs/:runId/resume", requireRole("admin"), expensiveOpLimiter, asy
     workspaceId: project.workspaceId || null,
     environmentId: environment?.id || null,
   };
-  runRepo.create(newRun);
 
-  // Mark the original run as resumed so the gate at line 687 (status check +
-  // failureReason='process_crash') rejects subsequent resume attempts. Without
-  // this, RUN-1 stays `interrupted`+`process_crash` after RUN-2 is dispatched,
-  // and a second `POST /runs/RUN-1/resume` call would re-dispatch the exact
-  // same "remaining" testQueue slice — `getCompletedTestIds(RUN-1)` only sees
-  // RUN-1's own `run_test_results` rows; RUN-2's results live under RUN-2's
-  // id, so the remaining set is unchanged. The duplicate dispatch can create
-  // duplicate records / send duplicate emails / charge duplicate payments on
-  // the target application under test. Setting `failureReason='resumed'`
-  // changes the != 'process_crash' check at line 687 to reject and also
-  // documents in the DB that this run was successfully resumed (correlate
-  // with the matching activity log row via `meta.resumedFromRunId`).
-  runRepo.update(req.params.runId, { failureReason: "resumed" });
+  // Atomic create-new + mark-original-resumed. Both writes go through one
+  // SQLite transaction so a crash or concurrent request between them can't
+  // leave RUN-1 still resumable while RUN-2 is already dispatched — which
+  // would let a second `POST /runs/RUN-1/resume` re-dispatch the exact same
+  // "remaining" slice (RUN-2's `run_test_results` rows live under RUN-2's
+  // id, so `getCompletedTestIds(RUN-1)` returns the same set), causing
+  // duplicate records / emails / payments on the target app. Same pattern
+  // used by `runRepo.markOrphansInterrupted` for its SELECT-then-UPDATE.
+  //
+  // `runRepo.create` and `runRepo.update` both call `getDatabase()` under
+  // the hood, so wrapping their callsites in `db.transaction(...)` here
+  // funnels both statements into a single BEGIN/COMMIT.
+  const db = getDatabase();
+  db.transaction(() => {
+    runRepo.create(newRun);
+    // Stamping `failureReason='resumed'` flips the gate at line 687
+    // (`failureReason !== 'process_crash'`) to reject any subsequent resume
+    // attempt on RUN-1. It also documents in the DB that this run was
+    // successfully resumed (correlate with the matching activity log row
+    // via `meta.resumedFromRunId`).
+    runRepo.update(req.params.runId, { failureReason: "resumed" });
+  })();
 
   logActivity({ ...actor(req),
     type: "test_run.resume", projectId: project.id, projectName: project.name,

@@ -245,11 +245,19 @@ async function captureState(page, ctx) {
     // "one snapshot per page" contract. B3's per-state persistence would
     // require a richer key (runId, url, stateFp); deferred until then.
     // Best-effort: a persistence hiccup must never fail the explorer.
+    //
+    // `loadMs` is intentionally not passed: explorer states are captured
+    // POST-ACTION (after a click / form fill), not post-navigation, so
+    // there's no `page.goto()` wall-clock to record. `takeSnapshot` does
+    // not produce a `_loadMs` field, and synthesising one from action
+    // timing would mix two different signals (navigation vs interaction)
+    // and pollute B2's adaptive-timeout p95 in `crawlSnapshotRepo.
+    // getLoadTimesByRunId()`. Only `crawlBrowser.js` records `loadMs`,
+    // exclusively around `page.goto()`. Explorer rows therefore store
+    // `loadMs: NULL` and are filtered out by B2's percentile query.
     if (ctx.run?.id) {
       try {
-        crawlSnapshotRepo.save(ctx.run.id, snapshot.url, snapshot, {
-          loadMs: Number.isFinite(snapshot._loadMs) ? snapshot._loadMs : undefined,
-        });
+        crawlSnapshotRepo.save(ctx.run.id, snapshot.url, snapshot);
       } catch (persistErr) {
         logWarn(ctx.run, `Failed to persist explorer snapshot for ${snapshot.url}: ${persistErr.message}`);
       }
