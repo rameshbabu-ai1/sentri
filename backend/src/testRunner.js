@@ -879,6 +879,18 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
   }
 
   for (const skippedTest of missingDependencySkipped) {
+    // AUTO-014: skip tests that already have a resolved row from a prior
+    // partial run. `resolvedTestIds` is hydrated from `run.results` at
+    // entry (line 602); on a shard retry, `filterShardRetrySurvivors`
+    // (`backend/src/utils/shardRetryFilter.js`) preserves prior
+    // `missing_upstream` skip rows because `isNonExecutedSkip()` returns
+    // true for them. Without this guard, the loop would push a duplicate
+    // skip on every retry, inflating `countNonExecutedSkips()` and
+    // shrinking the gate's pass-rate denominator. Mirrors the same
+    // `resolvedTestIds.has(test.id)` short-circuit used by
+    // `seedUpstreamFailedSkips()` (line 681) and the dispatch loop's
+    // pre-execute guard (line 862).
+    if (resolvedTestIds.has(skippedTest.id)) continue;
     // AUTO-014 + CAP-002 Phase 2: in shard mode, stamp the worker's
     // `shardIndex` on missing-upstream skips before `recordSkipResult`
     // reads `test._shardIndex`. Without this, the topo-sort-skipped tests
