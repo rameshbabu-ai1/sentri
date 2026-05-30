@@ -366,6 +366,7 @@ const files = [
 
 let passed = 0;
 let failed = 0;
+const failedFiles = [];
 
 for (const file of files) {
   const result = spawnSync(process.execPath, [file], {
@@ -377,6 +378,8 @@ for (const file of files) {
     passed += 1;
   } else {
     failed += 1;
+    failedFiles.push({ file, exitCode: result.status, signal: result.signal || null });
+    console.error(`\n❌ FAILED: ${file} (exit code ${result.status}${result.signal ? `, signal ${result.signal}` : ""})\n`);
   }
 }
 
@@ -385,6 +388,10 @@ console.log(`Results: ${passed} passed, ${failed} failed out of ${files.length} 
 
 if (failed > 0) {
   console.log("\n⚠️  Backend test run failed");
+  console.log("\nFailed test files:");
+  for (const { file, exitCode, signal } of failedFiles) {
+    console.log(`  ❌ ${file} — exit ${exitCode}${signal ? ` (${signal})` : ""}`);
+  }
   process.exit(1);
 }
 
