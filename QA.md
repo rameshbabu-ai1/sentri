@@ -9,7 +9,7 @@ It has two layers:
 1. **Golden E2E Happy Path** (must-pass) — one stitched-together user journey that exercises every core feature end-to-end. If any step fails, **stop the release**.
 2. **Per-feature happy paths + negatives** — targeted checks per area for full coverage.
 
-> ℹ️ Values are grounded in `README.md`, `AGENT.md`, `ROADMAP.md`, `docs/changelog.md`, `backend/src/routes/testFix.js`, `backend/src/pipeline/feedbackLoop.js`, `backend/src/utils/notifications.js`. `TBD` items require engineering confirmation.
+> ℹ️ Values are grounded in `README.md`, `AGENTS.md`, `ROADMAP.md`, `docs/changelog.md`, `backend/src/routes/testFix.js`, `backend/src/pipeline/feedbackLoop.js`, `backend/src/utils/notifications.js`. `TBD` items require engineering confirmation.
 
 ---
 
@@ -243,7 +243,7 @@ Then:
 2. Open `http://localhost:3000`.
 3. Record exact build / commit SHA under test (include in every bug report).
 4. Note environment: local / staging / preview URL.
-5. Dev-only seed endpoint is available when `NODE_ENV !== production` (see `AGENT.md`). Use it to pre-populate users/workspaces; otherwise register via UI.
+5. Dev-only seed endpoint is available when `NODE_ENV !== production` (see `AGENTS.md`). Use it to pre-populate users/workspaces; otherwise register via UI.
 
 **Test data to prepare:**
 - Stable crawl target URLs (from `frontend/src/demo.js` and CI):
@@ -657,12 +657,12 @@ _(automated: see `tests/e2e/specs/ui-smoke.spec.mjs` for login negative path + v
 4. **Mobile device emulation** (`docs/changelog.md` DIF-003) — pass `device` (e.g. `"iPhone 14"`, `"Pixel 7"`) → run uses Playwright device profile (viewport, user agent, touch). Verify dropdown lists curated devices.
 5. **Parallel execution** (`README.md`) — set parallelism 1–10 from UI (or `PARALLEL_WORKERS`). Verify each worker has isolated video/screenshots/network logs; default is 1.
 6. **Live run view** — RunDetail streams logs via SSE, shows per-step screenshots, and exposes **Abort** action mid-run.
-7. **Abort run** → run marked `stopped`; partial results retained; per-test hard timeout is `BROWSER_TEST_TIMEOUT` (default **120 000 ms**, `AGENT.md`).
+7. **Abort run** → run marked `stopped`; partial results retained; per-test hard timeout is `BROWSER_TEST_TIMEOUT` (default **120 000 ms**, `AGENTS.md`).
 8. Re-run failed tests only → only previously-failed tests execute.
 9. **Self-healing** (`README.md`) — break a primary selector, re-run; runtime tries role → label → text → aria-label → title, remembers the winner per element. Confirm subsequent run picks the previously-successful strategy first.
 
 **Negative / edge:**
-- Trigger run while another is in progress → concurrency = `PARALLEL_WORKERS` (default **1**, `AGENT.md`). Extra runs queue; no crash.
+- Trigger run while another is in progress → concurrency = `PARALLEL_WORKERS` (default **1**, `AGENTS.md`). Extra runs queue; no crash.
 - Run test against unreachable target → fails with clear network error, not timeout silence.
 - Long-running / hung test → aborted at `BROWSER_TEST_TIMEOUT` with a clear timeout error.
 - **Flaky test (intermittent failure)** → product-level auto-retry **IS** wired (AUTO-005, PR #2). Each test failure triggers up to `MAX_TEST_RETRIES` retries (default **2**, max 10, set to `0` to disable) before the result is recorded as truly failed. Verify via `result.retryCount` (number of retries actually consumed) and `result.failedAfterRetry` (true only when all attempts failed). A test that fails once then passes shows `retryCount: 1, status: "passed"` — notifications and failure counters fire only on `failedAfterRetry: true` (`backend/src/runner/retry.js`, `backend/src/testRunner.js:229-240`). **Note:** only the FINAL attempt's video / screenshots / trace are preserved on disk — earlier attempts overwrite each other (intentional; see retry.js JSDoc § "Artifact overwrite behaviour"). Self-healing (`safeClick` / `safeFill` selector waterfall) is a separate, lower-level recovery layer — DIF-015b's nth=N disambiguation also reduces flake at recording time.
