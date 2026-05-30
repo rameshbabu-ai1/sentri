@@ -11,14 +11,10 @@ import { getDatabase } from "../sqlite.js";
 // as one of the three highest-frequency paths to route through the queue;
 // without this wiring the throughput acceptance criterion at `:279-280`
 // (≥ 20% p50 reduction at parallelWorkers=10) cannot be met. The reads
-// (`get`, `getByTestId`, etc.) stay synchronous — they're the hot path
-// for the per-test waterfall and must observe the latest writes
-// immediately. B7-4 will later promote circuit-breaker writes (when
-// `failCount` crosses the threshold) to `priority: "durable"` so they
-// survive a SIGKILL; B1 ships the batched default that's strictly
-// better than the pre-B1 baseline on graceful shutdown (drain hook in
-// `index.js` + `worker.js` flushes everything).
-import { enqueue as enqueueDbWrite } from "../../utils/dbWriteQueue.js";
+// (`get`, `getByTestId`, `countByTestIds`, etc.) drain the queue first so
+// callers always see the latest writes. The drain is a no-op when the
+// queue is empty, so the per-read overhead is negligible.
+import { enqueue as enqueueDbWrite, drain as drainDbWriteQueue } from "../../utils/dbWriteQueue.js";
 
 /**
  * Get a healing entry by key.
@@ -26,6 +22,8 @@ import { enqueue as enqueueDbWrite } from "../../utils/dbWriteQueue.js";
  * @returns {Object|undefined}
  */
 export function get(key) {
+  // B1.2 — flush any queued `set()` writes before reading.
+  drainDbWriteQueue();
   const db = getDatabase();
   return db.prepare("SELECT * FROM healing_history WHERE key = ?").get(key) || undefined;
 }
@@ -89,12 +87,10 @@ function chunkedTestIdQuery(db, testIds, sqlFn) {
 export function set(key, entry) {
   const db = getDatabase();
   // Schema migration must run synchronously — the queued INSERT depends
-  // on the column existing. Cheap (idempotent boolean cache after first
-  // call) so the marginal overhead vs deferring is negligible.
+  // on the column existing.
   ensureStrategyVersionColumn(db);
-  // Snapshot the params into a plain object up-front so a caller that
-  // mutates `entry` between enqueue and flush doesn't change what gets
-  // persisted. The closure below captures the snapshot by value.
+  // Snapshot params up-front so a caller mutating `entry` between
+  // enqueue and flush can't change what gets persisted.
   const params = {
     key,
     strategyIndex: entry.strategyIndex ?? -1,
@@ -102,11 +98,6 @@ export function set(key, entry) {
     failCount: entry.failCount || 0,
     strategyVersion: entry.strategyVersion ?? null,
   };
-  // B1.2 — batched by default (lossy ≤ DB_WRITE_FLUSH_MS on SIGKILL,
-  // strictly better than baseline on SIGTERM via drain hook). Postgres
-  // dialect bypasses the queue (passthrough) so multi-replica deployments
-  // pay no batching latency. The graceful-shutdown drain in `index.js`
-  // and `worker.js` flushes everything before `closeDatabase()`.
   enqueueDbWrite(() => {
     db.prepare(`
       INSERT INTO healing_history (key, strategyIndex, succeededAt, failCount, strategyVersion)
@@ -125,6 +116,7 @@ export function set(key, entry) {
  * @returns {Object<string, Object>}
  */
 export function getAllAsDict() {
+  drainDbWriteQueue(); // B1.2 — see `get()` for rationale.
   const db = getDatabase();
   const rows = db.prepare("SELECT * FROM healing_history").all();
   const dict = {};
@@ -144,6 +136,7 @@ export function getAllAsDict() {
  * @returns {Object<string, Object>} Map of `"action::label"` → entry.
  */
 export function getByTestId(testId) {
+  drainDbWriteQueue(); // B1.2 — see `get()` for rationale.
   const db = getDatabase();
   // Ensure the strategyVersion column exists before querying — the ORDER BY
   // clause references it, but the column is not in the initial schema (001).
@@ -205,6 +198,7 @@ export function getByTestId(testId) {
  */
 export function getByTestIds(testIds) {
   if (!testIds || testIds.length === 0) return [];
+  drainDbWriteQueue(); // B1.2 — see `get()` for rationale.
   const db = getDatabase();
   ensureStrategyVersionColumn(db);
   // Chunk the OR fanout, then concat. We re-sort the merged result so
@@ -234,6 +228,9 @@ export function getByTestIds(testIds) {
  * @param {string[]} testIds
  */
 export function deleteByTestIds(testIds) {
+  // B1.2 — flush queued `set()` writes so an in-flight INSERT can't
+  // land AFTER this DELETE and leave a stale row.
+  drainDbWriteQueue();
   const db = getDatabase();
   const stmt = db.prepare("DELETE FROM healing_history WHERE key LIKE ?");
   const txn = db.transaction(() => {
@@ -252,6 +249,7 @@ export function deleteByTestIds(testIds) {
  */
 export function countByTestIds(testIds) {
   if (!testIds || testIds.length === 0) return 0;
+  drainDbWriteQueue(); // B1.2 — see `get()` for rationale.
   const db = getDatabase();
   const counts = chunkedTestIdQuery(db, testIds, (clauses, params) =>
     db.prepare(`SELECT COUNT(*) as cnt FROM healing_history WHERE ${clauses}`).get(...params).cnt
@@ -266,6 +264,7 @@ export function countByTestIds(testIds) {
  */
 export function countSuccessesByTestIds(testIds) {
   if (!testIds || testIds.length === 0) return 0;
+  drainDbWriteQueue(); // B1.2 — see `get()` for rationale.
   const db = getDatabase();
   const counts = chunkedTestIdQuery(db, testIds, (clauses, params) =>
     db.prepare(
