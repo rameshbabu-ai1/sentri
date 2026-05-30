@@ -218,7 +218,17 @@ export default function TestDetail() {
         setEditError(`Dependency cycle detected: ${dependencyCycle.join(" → ")}`);
         return;
       }
-      const payload = { name: editName.trim(), description: editDesc.trim(), steps: cleanSteps, priority: editPriority, dependsOn: editDependsOn };
+      const payload = { name: editName.trim(), description: editDesc.trim(), steps: cleanSteps, priority: editPriority };
+      // AUTO-014: only include `dependsOn` when the user actually changed it.
+      // `startEditing()` initialises `editDependsOn` to `[]` for legacy tests
+      // (where `test.dependsOn` is `null`); sending the unchanged `[]` would
+      // silently overwrite the row's documented `null` shape on every edit.
+      // Normalise null → [] for the comparison so we only PATCH when the set
+      // of declared dependencies has actually changed.
+      const prevDeps = Array.isArray(test.dependsOn) ? test.dependsOn : [];
+      if (JSON.stringify(editDependsOn) !== JSON.stringify(prevDeps)) {
+        payload.dependsOn = editDependsOn;
+      }
       if (codeEdited) {
         payload.playwrightCode = editCode;
       } else if (test.playwrightCode && stepsChanged) {
