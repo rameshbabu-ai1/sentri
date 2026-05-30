@@ -447,7 +447,7 @@ lands)
 **Covers sub-items:** RLY-003 (reviewer collapse detection), QAL-004
 (human escalation on agent failure)
 
-**Status:** 🔲 Planned | **Effort:** M | **Source:** Audit §C.2 · §D.1 · §D.2
+**Status:** 🔲 Inprogress | **Effort:** M | **Source:** Audit §C.2 · §D.1 · §D.2
 
 **Problem:**
 
