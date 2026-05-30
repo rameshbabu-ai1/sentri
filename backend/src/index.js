@@ -10,6 +10,7 @@
  * | `/api/v1` (tests)      | `routes/tests`      |
  * | `/api/v1` (recorder)   | `routes/recorder`   |
  * | `/api/v1` (testExports)| `routes/testExports`|
+ * | `/api/v1` (testApprovals)| `routes/testApprovals`|
  * | `/api/v1` (runs)       | `routes/runs`       |
  * | `/api/v1` (SSE)        | `routes/sse`        |
  * | `/api/v1` (dashboard)  | `routes/dashboard`  |
@@ -57,6 +58,7 @@ import projectsRouter from "./routes/projects.js";
 import testsRouter from "./routes/tests.js";
 import recorderRouter from "./routes/recorder.js";
 import testExportsRouter from "./routes/testExports.js";
+import testApprovalsRouter from "./routes/testApprovals.js";
 import runsRouter from "./routes/runs.js";
 import triggerRouter from "./routes/trigger.js";
 import sseRouter from "./routes/sse.js";
@@ -345,6 +347,7 @@ app.use(`${API_PREFIX}/projects`, requireAuth, workspaceScope, projectsRouter);
 app.use(API_PREFIX, requireAuth, workspaceScope, testsRouter);
 app.use(API_PREFIX, requireAuth, workspaceScope, recorderRouter);
 app.use(API_PREFIX, requireAuth, workspaceScope, testExportsRouter);
+app.use(API_PREFIX, requireAuth, workspaceScope, testApprovalsRouter);
 app.use(API_PREFIX, requireAuth, workspaceScope, runsRouter);
 app.use(API_PREFIX, requireAuth, workspaceScope, sseRouter);
 app.use(API_PREFIX, requireAuth, workspaceScope, dashboardRouter);
