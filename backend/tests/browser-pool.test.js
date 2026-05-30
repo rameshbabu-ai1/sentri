@@ -148,6 +148,39 @@ async function main() {
     assert.equal(pool.getStats().length, 0);
   });
 
+  await run("post-drain acquire rejects so SIGTERM cannot leak a zombie browser", async () => {
+    const fake = createFakeLauncher();
+    const pool = new BrowserPool({ size: 1, launcher: fake.launch });
+    await pool.drainAndClose();
+    await assert.rejects(
+      () => pool.acquire({ browserType: "chromium" }),
+      /draining/i,
+    );
+    await assert.rejects(
+      () => pool.acquireSharedBrowser("chromium"),
+      /draining/i,
+    );
+    assert.equal(fake.launches, 0);
+  });
+
+  await run("acquireSharedBrowser does not occupy a pool slot (deadlock fix)", async () => {
+    const fake = createFakeLauncher();
+    // Pool sized to 1 reproduces the testRunner.js trace-context deadlock
+    // when the trace lease was routed through `acquire()`. With
+    // `acquireSharedBrowser` the trace context shares the warm browser
+    // without consuming a slot, so per-test acquires still proceed.
+    const pool = new BrowserPool({ size: 1, launcher: fake.launch });
+    const sharedBrowser = await pool.acquireSharedBrowser("chromium");
+    const sharedContext = await sharedBrowser.newContext({});
+    assert.equal(pool.getStats()[0].inUse, 0);
+    const testLease = await pool.acquire({ browserType: "chromium" });
+    assert.equal(pool.getStats()[0].inUse, 1);
+    assert.equal(fake.launches, 1);
+    await testLease.release();
+    await sharedContext.close();
+    await pool.drainAndClose();
+  });
+
   if (failed) process.exit(1);
   console.log(`browser-pool.test.js: ${passed} passed`);
 }

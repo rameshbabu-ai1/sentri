@@ -498,7 +498,6 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
 
   let browser = null;
   let traceContext = null;
-  let traceLease = null;
 
   // DIF-002: resolve the requested browser once so we can log + persist a
   // canonical name (invalid / unknown values fall back to chromium).
@@ -516,17 +515,23 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
       },
     };
 
-    // Shared tracing context (separate from per-test contexts)
+    // Shared tracing context (separate from per-test contexts).
+    //
+    // The trace context is run-scoped: it is created here and held until the
+    // `finally` block flushes the trace zip. We MUST NOT route it through
+    // `browserPool.acquire()` — that would lock a pool slot for the entire
+    // run (silently reducing effective per-run parallelism by 1, and
+    // deadlocking outright when `BROWSER_POOL_SIZE=1` because every
+    // per-test acquire would queue forever behind the trace lease). Instead
+    // we share the warm browser process via `acquireSharedBrowser()` and
+    // own the context lifecycle ourselves; per-test contexts continue to
+    // flow through `acquire()` and respect the slot accounting.
     try {
-      traceLease = await browserPool.acquire({
-        browserType: resolvedBrowser,
-        createPage: false,
-        contextOptions: {
-          userAgent: "Mozilla/5.0 (compatible; AutonomousQA/1.0)",
-          viewport: { width: 1280, height: 720 },
-        },
+      const sharedBrowser = await browserPool.acquireSharedBrowser(resolvedBrowser);
+      traceContext = await sharedBrowser.newContext({
+        userAgent: "Mozilla/5.0 (compatible; AutonomousQA/1.0)",
+        viewport: { width: 1280, height: 720 },
       });
-      traceContext = traceLease.context;
       await traceContext.tracing.start({ screenshots: true, snapshots: true, sources: false });
     } catch (ctxErr) {
       const classified = classifyError(ctxErr, "run");
@@ -875,8 +880,10 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
       } catch (e) {
         logWarn(run, `Trace save failed: ${e.message}`);
       }
-      if (traceLease) await traceLease.release().catch(() => {});
-      else await traceContext.close().catch(() => {});
+      // We own the trace context directly (not via a pool lease) — see
+      // `acquireSharedBrowser` rationale above. Close it here so the
+      // underlying warm browser process stays available to other tests.
+      await traceContext.close().catch(() => {});
     }
   }
 

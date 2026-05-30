@@ -204,7 +204,33 @@ export class BrowserPool {
   }
 
   /**
+   * Acquire the warm browser for this type WITHOUT consuming a pool slot.
+   *
+   * Long-lived contexts (e.g. the per-run shared tracing context in
+   * `testRunner.js`) need to share the warm browser process but must not
+   * occupy a slot for the entire run — that would silently reduce effective
+   * test parallelism by 1, and outright deadlock the run when the pool size
+   * is 1 (every per-test `acquire()` queues forever waiting for the trace
+   * context to release). Callers are responsible for closing the resulting
+   * context themselves; the pool only owns the underlying browser process.
+   *
+   * @param {string} [browserType]
+   * @returns {Promise<Object>} Playwright Browser
+   */
+  async acquireSharedBrowser(browserType) {
+    if (this.draining) throw new Error("Browser pool is draining");
+    const bucket = this._getBucket(browserType);
+    const { browser } = await this._ensureBrowser(bucket);
+    return browser;
+  }
+
+  /**
    * Close all active contexts/browsers and reject queued waiters.
+   *
+   * After drain the pool is permanently sealed for this process — subsequent
+   * `acquire()` calls throw rather than launching a fresh browser the
+   * shutdown sequence has no way to clean up. Tests that exercise drain+
+   * reuse construct a new `BrowserPool` instance.
    *
    * @returns {Promise<void>}
    */
@@ -222,7 +248,10 @@ export class BrowserPool {
     }
     await Promise.allSettled(closes);
     this.buckets.clear();
-    this.draining = false;
+    // NOTE: deliberately keep `draining = true` so post-shutdown acquires
+    // reject loudly. Resetting to false here would silently re-arm the
+    // pool and let an in-flight job leak a zombie Chromium past the
+    // graceful-shutdown sequence.
   }
 
   /**
