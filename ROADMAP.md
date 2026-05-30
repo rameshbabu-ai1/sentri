@@ -456,7 +456,7 @@ CAP-002's Redis dependency is a single point of failure. Production SaaS deploym
 
 ### AUTO-011 — Historical trend analysis and anomaly detection 🔵 Medium
 
-**Status:** ✅ Complete (PR #TBD) | **Effort:** M | **Source:** Competitive Gap Analysis
+**Status:** 🔲 Planned | **Effort:** M | **Source:** Competitive Gap Analysis
 
 **Problem:** The dashboard shows a pass/fail trend but never detects anomalies. An autonomous system should alert: "Pass rate dropped 20% in the last 3 runs — likely regression introduced." The only statistical logic is a simple `trendDelta` at `Dashboard.jsx:122-126`.
 
