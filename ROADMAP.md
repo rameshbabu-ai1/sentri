@@ -51,7 +51,7 @@ The following items have been verified complete against the codebase and are **n
 
 | ID | Title | PR / Commit                                                     |
 |----|-------|-----------------------------------------------------------------|
-| MNT-015 | Browser pool reuse + per-tenant cost-weighted AI rate limiting — warm Playwright browser-process pool with fresh-context-per-acquire isolation, FIFO waiter queue, `BROWSER_POOL_SIZE` default `WORKER_CONCURRENCY`/`MAX_WORKERS`; per-workspace AI cost limiter (AI=10 units, regular=1) in `backend/src/middleware/aiRateLimit.js` keyed on `workspaceId:ai` via new `incrWithExpiry()` Redis Lua helper, mounted on `POST /chat`, `POST /projects/:id/crawl`, `POST /projects/:id/tests/generate`, `POST /tests/:testId/fix`, `POST /settings/agent-roles/:role/test`; graceful-shutdown drain hooks in `backend/src/index.js` + `backend/src/worker.js` before queue/Redis teardown; 4 Prometheus metrics (`app_browser_pool_size`, `app_browser_pool_in_use`, `app_browser_pool_acquires_total`, `app_ai_rate_limited_total`). | PR #1 |
+| MNT-015 | Browser pool reuse + per-tenant cost-weighted AI rate limiting (warm Playwright pool, fresh-context-per-acquire, `RateLimit-*` headers, graceful-shutdown drain). | PR #1 |
 | AUTO-023 | Autonomous multi-agent collaboration — 5-bundle plan (envelope schema → linear handoff → reviewer↔author loop → supervisor orchestrator → shared memory + tool calling). | PR #34, #35, #36, #37, #38 |
 | INF-009 | Helm chart + Kubernetes readiness/liveness probes + disaster-recovery playbook (nightly `pg_dump -Fc` to S3, RTO < 4h / RPO < 24h). | PR #30 |
 | S3-02 | Shadow DOM support in crawler | PR #55                                                          |

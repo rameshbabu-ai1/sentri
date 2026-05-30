@@ -118,13 +118,21 @@ export class BrowserPool {
     return { browser: await bucket.launching, launched: true };
   }
 
-  async _createLease(bucket, args = {}) {
+  async _createLease(bucket, args = {}, opts = {}) {
     bucket.inUse += 1;
     browserPoolInUse.set({ type: bucket.type }, bucket.inUse);
     let context = null;
     try {
       const { browser, launched } = await this._ensureBrowser(bucket);
-      browserPoolAcquiresTotal.inc({ type: bucket.type, outcome: launched ? "miss" : "hit" });
+      // Skip the hit/miss bump when this lease was triggered by a queued
+      // waiter — `acquire()` already counted it as `outcome: "queue"`. Without
+      // this guard every queued acquire double-counts the total counter
+      // (once as `queue` at queue-time, once as `hit`/`miss` at wake-time),
+      // inflating throughput dashboards and corrupting the hit/miss/queue
+      // ratio operators rely on for capacity planning.
+      if (!opts.fromWaiter) {
+        browserPoolAcquiresTotal.inc({ type: bucket.type, outcome: launched ? "miss" : "hit" });
+      }
       context = await browser.newContext(normaliseContextOptions(args));
       bucket.contexts.add(context);
       const page = args.createPage === false ? null : await context.newPage();
@@ -149,7 +157,9 @@ export class BrowserPool {
   _wakeNext(bucket) {
     if (this.draining || bucket.waiters.length === 0 || bucket.inUse >= this.size) return;
     const waiter = bucket.waiters.shift();
-    this._createLease(bucket, waiter.args).then(waiter.resolve, waiter.reject);
+    // `fromWaiter: true` so `_createLease` skips the inner hit/miss bump —
+    // `acquire()` already counted this request as `outcome: "queue"`.
+    this._createLease(bucket, waiter.args, { fromWaiter: true }).then(waiter.resolve, waiter.reject);
   }
 
   /**

@@ -26,25 +26,36 @@ export function defaultAiCost(req) {
 /**
  * Build middleware that enforces a per-workspace AI-rate budget.
  *
+ * Uses a SINGLE per-workspace token bucket with cost-weighted increments —
+ * AI mutations consume more tokens than regular calls (per `costFn`), but
+ * both draw from the same `${workspaceId}:ai` budget against the same cap.
+ * An earlier shape kept two caps (`aiCap` / `regularCap`) keyed off cost
+ * but persisted to the SAME Redis key, which produced inconsistent
+ * enforcement when the caps differed (the IETF `RateLimit-Limit` header
+ * also flickered between values within a window). Industry pattern is one
+ * key → one cap, with cost-weighting differentiating call classes inside
+ * that single budget — matches Vercel AI Gateway, Cursor, OpenRouter.
+ *
  * @param {Object} [opts]
  * @param {Function} [opts.costFn]
  * @param {number} [opts.windowSec]
- * @param {number} [opts.aiCap]
- * @param {number} [opts.regularCap]
+ * @param {number} [opts.cap]
  * @returns {Function}
  */
 export function aiRateLimit(opts = {}) {
   const costFn = opts.costFn || defaultAiCost;
   const windowSec = opts.windowSec || parsePositiveEnv("AI_RATE_LIMIT_WINDOW_SEC", 60, 1, 3600);
-  const aiCap = opts.aiCap || parsePositiveEnv("AI_RATE_LIMIT_PER_MIN", 300, 1, 100000);
-  const regularCap = opts.regularCap || parsePositiveEnv("AI_RATE_LIMIT_REGULAR_PER_MIN", 300, 1, 100000);
+  // `AI_RATE_LIMIT_PER_MIN` is the canonical knob (300 cost units / minute /
+  // workspace by default = 30 AI mutations OR 300 regular calls / minute).
+  // Legacy `AI_RATE_LIMIT_REGULAR_PER_MIN` is accepted for backward
+  // compatibility but the value is unused — see the JSDoc above for why.
+  const cap = opts.cap || parsePositiveEnv("AI_RATE_LIMIT_PER_MIN", 300, 1, 100000);
 
   return async function sentriAiRateLimit(req, res, next) {
     try {
       const workspaceId = req.workspaceId || req.user?.workspaceId;
       if (!workspaceId) return next();
       const cost = Math.max(1, Number.parseInt(costFn(req), 10) || 1);
-      const cap = cost > 1 ? aiCap : regularCap;
       const key = `${workspaceId}:ai`;
       const { value, ttl } = await incrWithExpiry(key, cost, windowSec);
       // IETF draft "ratelimit-headers" + GitHub / Stripe / OpenAI convention.

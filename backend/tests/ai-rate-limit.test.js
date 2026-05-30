@@ -37,8 +37,8 @@ async function main() {
     catch (err) { failed++; console.log(`  ❌  ${name}\n      ${err.stack || err.message}`); }
   }
 
-  await run("cost-weighted requests trip the AI cap", async () => {
-    const mw = aiRateLimit({ aiCap: 15, regularCap: 300, windowSec: 60, costFn: () => 10 });
+  await run("cost-weighted requests trip the cap", async () => {
+    const mw = aiRateLimit({ cap: 15, windowSec: 60, costFn: () => 10 });
     const workspaceId = `ws-cost-${Date.now()}`;
     let out = await invoke(mw, createReq({ workspaceId }));
     assert.equal(out.nextCalled, true);
@@ -49,7 +49,7 @@ async function main() {
   });
 
   await run("sibling workspaces use isolated buckets", async () => {
-    const mw = aiRateLimit({ aiCap: 10, regularCap: 300, windowSec: 60, costFn: () => 10 });
+    const mw = aiRateLimit({ cap: 10, windowSec: 60, costFn: () => 10 });
     const a = `ws-a-${Date.now()}`;
     const b = `ws-b-${Date.now()}`;
     assert.equal((await invoke(mw, createReq({ workspaceId: a }))).nextCalled, true);
@@ -57,8 +57,11 @@ async function main() {
     assert.equal((await invoke(mw, createReq({ workspaceId: b }))).nextCalled, true);
   });
 
-  await run("regular cost uses the regular cap", async () => {
-    const mw = aiRateLimit({ aiCap: 10, regularCap: 2, windowSec: 60, costFn: () => 1 });
+  await run("regular (cost=1) requests share the same bucket and consume one unit each", async () => {
+    // Single bucket, single cap — cost-weighting differentiates AI from
+    // regular calls (10 vs 1), but both draw from the same budget. Industry
+    // pattern (Vercel AI Gateway, Cursor, OpenRouter): one key, one cap.
+    const mw = aiRateLimit({ cap: 2, windowSec: 60, costFn: () => 1 });
     const workspaceId = `ws-regular-${Date.now()}`;
     assert.equal((await invoke(mw, createReq({ workspaceId }))).nextCalled, true);
     assert.equal((await invoke(mw, createReq({ workspaceId }))).nextCalled, true);
@@ -66,14 +69,14 @@ async function main() {
   });
 
   await run("bypasses requests without workspace scope", async () => {
-    const mw = aiRateLimit({ aiCap: 1, regularCap: 1, costFn: () => 10 });
+    const mw = aiRateLimit({ cap: 1, costFn: () => 10 });
     const out = await invoke(mw, { method: "POST", path: "/health" });
     assert.equal(out.nextCalled, true);
     assert.equal(out.res.statusCode, 200);
   });
 
   await run("emits RateLimit-* headers on allow path", async () => {
-    const mw = aiRateLimit({ aiCap: 100, regularCap: 100, windowSec: 60, costFn: () => 10 });
+    const mw = aiRateLimit({ cap: 100, windowSec: 60, costFn: () => 10 });
     const workspaceId = `ws-headers-${Date.now()}`;
     const out = await invoke(mw, createReq({ workspaceId }));
     assert.equal(out.nextCalled, true);
@@ -83,7 +86,7 @@ async function main() {
   });
 
   await run("emits RateLimit-* headers + Retry-After on 429", async () => {
-    const mw = aiRateLimit({ aiCap: 10, regularCap: 100, windowSec: 60, costFn: () => 10 });
+    const mw = aiRateLimit({ cap: 10, windowSec: 60, costFn: () => 10 });
     const workspaceId = `ws-headers-429-${Date.now()}`;
     await invoke(mw, createReq({ workspaceId }));
     const out = await invoke(mw, createReq({ workspaceId }));
@@ -91,6 +94,22 @@ async function main() {
     assert.equal(out.res.headers["ratelimit-limit"], "10");
     assert.equal(out.res.headers["ratelimit-remaining"], "0");
     assert.ok(Number(out.res.headers["retry-after"]) > 0);
+  });
+
+  await run("RateLimit-Limit header is consistent across mixed-cost requests within a window", async () => {
+    // Regression: an earlier shape kept two caps (aiCap / regularCap) but
+    // shared the same Redis key, so the header flickered between values
+    // when AI mutations and regular calls landed in the same window — and
+    // the 429 trigger depended on which call type happened to be tested.
+    // Single-cap design pins this header to one value forever in a window.
+    const mw = aiRateLimit({ cap: 50, windowSec: 60 });
+    const workspaceId = `ws-mixed-${Date.now()}`;
+    const aiReq = { ...createReq({ workspaceId }), method: "POST" };
+    const getReq = { ...createReq({ workspaceId }), method: "GET" };
+    const aiOut = await invoke(mw, aiReq);
+    const getOut = await invoke(mw, getReq);
+    assert.equal(aiOut.res.headers["ratelimit-limit"], "50");
+    assert.equal(getOut.res.headers["ratelimit-limit"], "50");
   });
 
   if (failed) process.exit(1);
