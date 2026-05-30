@@ -193,10 +193,21 @@ async function main() {
   // Return shape changed from `number` → `{ count, ids }` so the boot-time
   // hook can correlate recovered runs with subsequent resume requests.
   await test("markOrphansInterrupted: stamps failureReason and returns recovered IDs", () => {
-    const orphan1 = makeRun(project.id, { status: "running" });
-    const orphan2 = makeRun(project.id, { status: "running" });
-    const orphan3 = makeRun(project.id, { status: "running" });
-    const control = makeRun(project.id, {
+    // Each orphan needs its own project because the partial unique index
+    // `idx_runs_one_active_per_project` (migration 002) enforces at most one
+    // status='running' run per projectId.
+    const p1 = makeProject();
+    const p2 = makeProject();
+    const p3 = makeProject();
+    const p4 = makeProject();
+    projectRepo.create(p1);
+    projectRepo.create(p2);
+    projectRepo.create(p3);
+    projectRepo.create(p4);
+    const orphan1 = makeRun(p1.id, { status: "running" });
+    const orphan2 = makeRun(p2.id, { status: "running" });
+    const orphan3 = makeRun(p3.id, { status: "running" });
+    const control = makeRun(p4.id, {
       status: "completed",
       finishedAt: new Date().toISOString(),
     });
