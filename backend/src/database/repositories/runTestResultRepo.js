@@ -35,6 +35,8 @@
 
 import { getDatabase } from "../sqlite.js";
 import { generateRunTestResultId } from "../../utils/idGenerator.js";
+import { runTestResultDuplicatesTotal } from "../../utils/metrics.js";
+import { formatLogLine } from "../../utils/logFormatter.js";
 
 /**
  * @typedef {Object} RunTestResultRow
@@ -61,15 +63,35 @@ import { generateRunTestResultId } from "../../utils/idGenerator.js";
  * the result is durable before the next test starts. Safe to call
  * concurrently from parallel workers — SQLite serialises via WAL and the
  * UNIQUE(runId, testId, iterationIndex) constraint prevents duplicate
- * writes when a worker is restarted mid-flight (the second write becomes
- * a no-op via `INSERT OR IGNORE`).
+ * writes when a worker is restarted mid-flight.
+ *
+ * ### Conflict handling
+ *
+ * Uses `INSERT OR IGNORE` for idempotency, but bumps the
+ * `app_run_test_result_duplicates_total{reason}` counter on every
+ * conflict so silent drops are observable. Industry-standard
+ * (Splunk / Datadog / Auth0) convention is to log every dedup decision,
+ * never swallow it — operators must be able to distinguish "the resume
+ * path correctly replayed" from "we have a write-amplification bug".
+ *
+ * The caller passes `opts.reason` so the counter label is honest:
+ *   • `"resume_replay"`     — `POST /runs/:id/resume` is re-enqueuing.
+ *   • `"runner"` (default)  — normal per-test flush from `testRunner.js`.
+ *
+ * A conflict with `reason='runner'` records `duplicate_dispatch` on the
+ * counter (unexpected). A conflict with `reason='resume_replay'`
+ * records `resume_replay` (expected).
  *
  * @param {string} runId
  * @param {Object} result  — shape produced by `executeTest.js`
- * @returns {void}
+ * @param {Object} [opts]
+ * @param {"runner"|"resume_replay"} [opts.reason="runner"]
+ * @returns {{ inserted: boolean, reason: string }} `inserted: false` when the
+ *   UNIQUE constraint kicked in; counter is bumped before returning.
  */
-export function append(runId, result) {
-  if (!runId || !result || !result.testId) return;
+export function append(runId, result, opts = {}) {
+  if (!runId || !result || !result.testId) return { inserted: false, reason: "invalid_input" };
+  const callerReason = opts.reason === "resume_replay" ? "resume_replay" : "runner";
   const db = getDatabase();
   const id = generateRunTestResultId();
   const createdAt = new Date().toISOString();
@@ -79,11 +101,10 @@ export function append(runId, result) {
   const iterationIndex = Number.isInteger(result.iterationIndex)
     ? result.iterationIndex
     : 0;
-  // INSERT OR IGNORE rather than INSERT — the resume path may replay a
-  // test that was *almost* persisted before a crash (worker had emitted
-  // its result but SQLite hadn't committed). Idempotency wins over
-  // visibility into the conflict.
-  db.prepare(
+  // INSERT OR IGNORE keeps the write idempotent, but `info.changes === 0`
+  // tells us the UNIQUE constraint kicked in so we can attribute the
+  // duplicate to its source via the counter.
+  const info = db.prepare(
     `INSERT OR IGNORE INTO run_test_results
        (id, runId, testId, status, error, errorCategory, duration,
         retryCount, artifacts, healingEvents, iterationIndex, createdAt)
@@ -102,6 +123,25 @@ export function append(runId, result) {
     iterationIndex,
     createdAt,
   );
+  if (info.changes === 0) {
+    // The label distinguishes "expected (resume)" from "unexpected
+    // (double-dispatch bug)". Best-effort metric increment — a metric
+    // hiccup must never fail an audit-row write.
+    const metricLabel = callerReason === "resume_replay" ? "resume_replay" : "duplicate_dispatch";
+    try { runTestResultDuplicatesTotal.inc({ reason: metricLabel }); } catch { /* best-effort */ }
+    if (metricLabel === "duplicate_dispatch") {
+      // Loud warn so the structured log surfaces what the counter
+      // alert points to. `runId` + `testId` + `iterationIndex` is the
+      // exact tuple the dispatcher must investigate.
+      console.warn(formatLogLine(
+        "warn",
+        runId,
+        `[run_test_results] duplicate write rejected (runId=${runId} testId=${result.testId} iter=${iterationIndex}) — investigate runner dispatch`,
+      ));
+    }
+    return { inserted: false, reason: metricLabel };
+  }
+  return { inserted: true, reason: callerReason };
 }
 
 // ─── Read ─────────────────────────────────────────────────────────────────────

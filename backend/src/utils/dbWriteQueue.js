@@ -20,13 +20,34 @@
  * - **PostgreSQL**: the queue is a passthrough — calls execute
  *   synchronously. Postgres handles concurrent writers natively; the
  *   batching machinery would add latency without throughput benefit.
- * - **High priority**: callers can pass `{ priority: "high" }` to bypass
- *   the batch and execute immediately under a synchronous transaction.
- *   Reserved for write paths whose durability matters more than
- *   throughput (e.g. healing circuit-breaker trip, B7-4).
  * - **Graceful shutdown**: {@link drain} flushes all pending writes
  *   synchronously. The shutdown sequence in `index.js` calls it before
  *   `closeDatabase()`.
+ *
+ * ## Durability contract — read this before adding a call site
+ *
+ * The queue is a **write-behind cache** with three documented modes,
+ * matching the industry-standard tiered-durability pattern (Postgres
+ * `synchronous_commit`, Kafka `acks`, MySQL `sync_binlog`). Pick the
+ * mode that matches the audit / compliance need of the write:
+ *
+ * | Mode             | API                                  | Latency | Durability on SIGKILL                                 |
+ * |------------------|--------------------------------------|---------|-------------------------------------------------------|
+ * | `"batched"` (default) | `enqueue(fn)`                    | < 1 ms (enqueue) | Loses up to one batch (≤ `DB_WRITE_BATCH_SIZE` rows or `DB_WRITE_FLUSH_MS` ms of writes) |
+ * | `"durable"`      | `enqueue(fn, { priority: "durable" })` | ~1–5 ms | Loses nothing — synchronous `BEGIN/COMMIT` before return |
+ * | `"high"` (alias) | `enqueue(fn, { priority: "high" })` | ~1–5 ms | Same as `"durable"` — kept as a back-compat alias |
+ *
+ * **Rule of thumb:**
+ *   • Audit / compliance / circuit-breaker writes → `"durable"`.
+ *   • Append-only telemetry / per-test results → `"batched"` (default).
+ *   • Heavy log volume (`run_logs`) → `"batched"`.
+ *
+ * The default `"batched"` mode is **strictly better than the pre-B1.2
+ * baseline** for graceful SIGTERM (the drain hook flushes everything)
+ * but **trades up to `DB_WRITE_FLUSH_MS` of writes for throughput on
+ * SIGKILL / OOM kill**. This tradeoff is identical to Kafka producer
+ * `acks=1` and Postgres `synchronous_commit=off` — operators who need
+ * "lose-nothing" semantics opt into `"durable"` on a per-write basis.
  *
  * ## Failure model
  *
@@ -45,7 +66,16 @@
  *
  * @example
  * import { enqueue, drain } from "./utils/dbWriteQueue.js";
- * enqueue(() => db.prepare("INSERT INTO …").run(…));
+ *
+ * // Default — batched, high throughput, may lose up to one batch on SIGKILL.
+ * enqueue(() => db.prepare("INSERT INTO run_logs …").run(…));
+ *
+ * // Compliance-critical — synchronous transaction, lose-nothing on SIGKILL.
+ * enqueue(
+ *   () => db.prepare("INSERT INTO activities (…)").run(…),
+ *   { priority: "durable" },
+ * );
+ *
  * // …later, at shutdown:
  * drain();
  */
@@ -131,21 +161,35 @@ function flushNow() {
 /**
  * Enqueue a write closure for batched execution.
  *
- * On PostgreSQL or when `opts.priority === "high"`, executes
- * synchronously inside its own transaction.
+ * Durability mode is selected via `opts.priority`:
+ *   • `"batched"` (default) — buffered; flushed on size/time trigger or drain.
+ *   • `"durable"` — synchronous transaction; returns only after commit.
+ *   • `"high"` — back-compat alias for `"durable"`.
+ *
+ * On PostgreSQL ALL modes execute synchronously (the queue is a
+ * passthrough — Postgres handles concurrent writers natively without
+ * the batching machinery).
  *
  * @param {WriteFn} fn      - Closure that runs one or more `db.prepare(…).run(…)` calls.
  * @param {Object}  [opts]
- * @param {"normal"|"high"} [opts.priority="normal"]
+ * @param {"batched"|"durable"|"high"|"normal"} [opts.priority="batched"]
+ *   `"normal"` is a back-compat alias for `"batched"`.
  * @returns {void}
  */
 export function enqueue(fn, opts = {}) {
   if (typeof fn !== "function") return;
 
+  // Two priority families: durable (`"durable"` | `"high"`) → sync write,
+  // batched (`"batched"` | `"normal"` | anything else) → buffered. Both
+  // aliases for each mode are accepted so existing callers keep working
+  // and new callers can use the more honest `"durable"` label.
+  const isDurable = opts.priority === "durable" || opts.priority === "high";
+
   const dialect = getDatabaseDialect();
-  if (dialect === "postgres" || opts.priority === "high") {
-    // Passthrough — Postgres handles concurrent writers natively, and
-    // high-priority writes must be durable before this call returns.
+  if (dialect === "postgres" || isDurable) {
+    // Synchronous transaction — durable writes must be committed before
+    // this call returns, and Postgres handles concurrency natively so
+    // batching adds latency without throughput benefit.
     try {
       const db = getDatabase();
       db.transaction(() => fn())();

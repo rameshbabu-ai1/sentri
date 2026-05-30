@@ -14,9 +14,14 @@
 -- in-memory shadow path that the pipeline retains during the B1 →
 -- B2 transition.
 
+-- Referential integrity: `ON DELETE CASCADE` mirrors every other child
+-- table of `runs` (run_logs, accessibility_violations, …) so a parent
+-- run purge cleans up snapshots without leaving orphans — SOC 2 CC8.1
+-- baseline for audit-trail integrity.
+
 CREATE TABLE IF NOT EXISTS crawl_snapshots (
   id TEXT PRIMARY KEY,
-  runId TEXT NOT NULL,
+  runId TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
   url TEXT NOT NULL,
   snapshotJson TEXT NOT NULL,
   loadMs INTEGER,
