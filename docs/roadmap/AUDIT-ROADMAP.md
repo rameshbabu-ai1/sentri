@@ -294,7 +294,7 @@ pool drain before queue drain, already in place)
 **Covers sub-items:** RLY-006 (iframe enumeration), RLY-009 (SPA hydration +
 adaptive timeouts)
 
-**Status:** 🔲 Planned | **Effort:** L | **Source:** Audit §B.1 · §B.2 · §E.2
+**Status:** 🔲 in progress | **Effort:** L | **Source:** Audit §B.1 · §B.2 · §E.2
 
 **Problem:**
 
