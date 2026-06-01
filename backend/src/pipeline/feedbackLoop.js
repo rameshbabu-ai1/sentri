@@ -672,6 +672,18 @@ export async function regenerateFailingTest(improvement, signal, options = {}) {
     // loop's `onOutcome` symmetry contract.
     let loopOutcome = null;
     let loopThrew = false;
+    // B3 (AUDIT-ROADMAP) — capture the loop's terminal outcome via the
+    // `onOutcome` hook so the `reject_final` path (which THROWS before
+    // assigning `loopOutcome`) still surfaces `roundsCompleted` to
+    // downstream consumers. Pre-fix: assignment to `loopOutcome` happened
+    // only on the normal-return path, so every ReviewRejection-rejected
+    // test reported `roundsCompleted: 0` to the activity log,
+    // notifications, and the RunDetail UI — even when the loop ran
+    // multiple rounds before the reviewer issued `reject_final`. The
+    // hook fires for ALL terminal paths (accept, max_rounds, timeout,
+    // quota_exhausted, reject_final) per the contract at
+    // `agentLoop.js#safeOnOutcome`.
+    let capturedOutcome = null;
     try {
     loopOutcome = await runReviewerAuthorLoop(
       // Initial artifact carries the failing test as a single-test
@@ -682,6 +694,7 @@ export async function regenerateFailingTest(improvement, signal, options = {}) {
         runId: _runId,
         threadId,
         workspaceId,
+        onOutcome: (out) => { capturedOutcome = out; },
         // B3 (AUDIT-ROADMAP) — propagate the upstream collapse decision
         // so the loop suppresses its duplicate AI-005c advisory. The
         // reviewer in this caller is already a heuristic
@@ -926,6 +939,11 @@ export async function regenerateFailingTest(improvement, signal, options = {}) {
         // structured handoff record carrying the outcome, not just
         // a thrown error in the logs.
         const bridgeOutcome = loopThrew ? "reject_final" : (loopOutcome?.outcome || null);
+        // B3 — prefer `capturedOutcome` (set via `onOutcome` hook for
+        // every terminal path including `reject_final`) over the
+        // `loopOutcome` assignment which is `null` on the throw path.
+        // See the capture-hook docblock at the loop call-site above.
+        const finalOutcome = loopOutcome || capturedOutcome;
         emitHandoffEnvelope({
           runId: _runId, threadId, workspaceId,
           fromRole: "author", toRole: "reviewer",
@@ -934,7 +952,7 @@ export async function regenerateFailingTest(improvement, signal, options = {}) {
             testId: test?.id || null,
             failureCategory,
             outcome: bridgeOutcome,
-            roundsCompleted: loopOutcome?.roundsCompleted || 0,
+            roundsCompleted: finalOutcome?.roundsCompleted || 0,
             improved: { name: finalCandidate?.name, description: finalCandidate?.description },
           },
           rationale: "Author regenerated failing test (B3 loop outcome: " + (bridgeOutcome || "unknown") + ")",
@@ -956,7 +974,12 @@ export async function regenerateFailingTest(improvement, signal, options = {}) {
             testId: test?.id || null,
             testName: test?.name || null,
             failureCategory,
-            roundsCompleted: loopOutcome?.roundsCompleted || 0,
+            // B3 — `loopOutcome` is `null` on the throw path; use
+            // `capturedOutcome` (set via `onOutcome` hook) so the
+            // rejected test's `roundsCompleted` reaches the activity
+            // log + notifications + RunDetail UI with the actual
+            // round count instead of a misleading `0`.
+            roundsCompleted: capturedOutcome?.roundsCompleted ?? loopOutcome?.roundsCompleted ?? 0,
           });
         } catch { /* best-effort — must not mask the rejection signal */ }
       }
