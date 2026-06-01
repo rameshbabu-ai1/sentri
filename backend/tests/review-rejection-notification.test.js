@@ -32,7 +32,7 @@ import * as projectRepo from "../src/database/repositories/projectRepo.js";
 import * as auditDlqRepo from "../src/database/repositories/auditDlqRepo.js";
 
 const ctx = createTestContext();
-const { test, summary } = ctx.createTestRunner();
+const runner = ctx.createTestRunner();
 const { resetDb, getDatabase } = ctx;
 
 function seedProject({ id, name = "Test Project", workspaceId = "__system__", reviewRejectionAlertThreshold = 0, reviewRejectionAlertLastFiredAt = null } = {}) {
@@ -85,11 +85,11 @@ function fakeRejections(n) {
 async function main() {
   resetDb();
 
-  await test("ACTIVITY_TYPES.TEST_REVIEW_REJECTED is the canonical literal", () => {
+  await runner.test("ACTIVITY_TYPES.TEST_REVIEW_REJECTED is the canonical literal", () => {
     assert.equal(ACTIVITY_TYPES.TEST_REVIEW_REJECTED, "test.review_rejected");
   });
 
-  await test("fireReviewRejectionNotifications no-ops on empty rejection list", async () => {
+  await runner.test("fireReviewRejectionNotifications no-ops on empty rejection list", async () => {
     // No project / settings seeded — dispatcher must short-circuit before
     // touching the DB. A throw here would surface as a test failure.
     const project = { id: "PROJ-empty", name: "Empty", reviewRejectionAlertThreshold: 0 };
@@ -98,7 +98,7 @@ async function main() {
     await fireReviewRejectionNotifications(fakeRun(project.id), project, undefined);
   });
 
-  await test("fireReviewRejectionNotifications honours threshold = -1 (opt-out)", async () => {
+  await runner.test("fireReviewRejectionNotifications honours threshold = -1 (opt-out)", async () => {
     resetDb();
     const project = seedProject({ id: "PROJ-optout", reviewRejectionAlertThreshold: -1 });
     seedNotificationSettings(project.id, { enabled: 1 });
@@ -111,7 +111,7 @@ async function main() {
     // here exercises the gate without making outbound HTTP.
   });
 
-  await test("fireReviewRejectionNotifications honours threshold > rejections (no-op)", async () => {
+  await runner.test("fireReviewRejectionNotifications honours threshold > rejections (no-op)", async () => {
     resetDb();
     const project = seedProject({ id: "PROJ-belowthr", reviewRejectionAlertThreshold: 10 });
     seedNotificationSettings(project.id, { enabled: 1 });
@@ -119,7 +119,7 @@ async function main() {
     // Same contract as above — no throw, no network call.
   });
 
-  await test("fireReviewRejectionNotifications skips when notification settings disabled", async () => {
+  await runner.test("fireReviewRejectionNotifications skips when notification settings disabled", async () => {
     resetDb();
     const project = seedProject({ id: "PROJ-disabled", reviewRejectionAlertThreshold: 0 });
     seedNotificationSettings(project.id, { enabled: 0 });
@@ -127,14 +127,14 @@ async function main() {
     await fireReviewRejectionNotifications(fakeRun(project.id), project, fakeRejections(1));
   });
 
-  await test("fireReviewRejectionNotifications skips when no notification settings row exists", async () => {
+  await runner.test("fireReviewRejectionNotifications skips when no notification settings row exists", async () => {
     resetDb();
     const project = seedProject({ id: "PROJ-nosettings", reviewRejectionAlertThreshold: 0 });
     // No notification_settings row — dispatcher's `if (!settings)` gate fires.
     await fireReviewRejectionNotifications(fakeRun(project.id), project, fakeRejections(2));
   });
 
-  await test("fireReviewRejectionNotifications threshold = 0 + enabled + no channels → silent OK", async () => {
+  await runner.test("fireReviewRejectionNotifications threshold = 0 + enabled + no channels → silent OK", async () => {
     resetDb();
     const project = seedProject({ id: "PROJ-nochannels", reviewRejectionAlertThreshold: 0 });
     // Settings row enabled but no teams/email/webhook URL configured —
@@ -147,7 +147,7 @@ async function main() {
 
   // ── B3 industry-standard hardening cases ────────────────────────────────
 
-  await test("cooldown — recent reviewRejectionAlertLastFiredAt suppresses dispatch", async () => {
+  await runner.test("cooldown — recent reviewRejectionAlertLastFiredAt suppresses dispatch", async () => {
     // Set the timestamp to 10 minutes ago; default cooldown is 1 hour so
     // the dispatcher must short-circuit before touching the DB or the
     // network. Verified by absence of any throw + counter bumps to
@@ -183,7 +183,7 @@ async function main() {
       `Teams channel must record one cooldown_skipped bump; before=${before} after=${after}`);
   });
 
-  await test("cooldown — old reviewRejectionAlertLastFiredAt does NOT suppress dispatch", async () => {
+  await runner.test("cooldown — old reviewRejectionAlertLastFiredAt does NOT suppress dispatch", async () => {
     // Timestamp 2 hours ago > 1 hour default cooldown → dispatch proceeds
     // through the threshold + settings gates. With no channels configured
     // the run still completes without throwing; this pins the contract
@@ -200,7 +200,7 @@ async function main() {
     await fireReviewRejectionNotifications(fakeRun(project.id), project, fakeRejections(1));
   });
 
-  await test("cooldown — env override (REVIEW_REJECTION_NOTIFICATION_COOLDOWN_MS=0) disables debounce", async () => {
+  await runner.test("cooldown — env override (REVIEW_REJECTION_NOTIFICATION_COOLDOWN_MS=0) disables debounce", async () => {
     // Operators with high-volume noise tolerance can set the env to 0
     // for "every rejection set fires immediately". Pin the env contract
     // so a future refactor that hard-codes the 1h default fails loudly.
@@ -235,7 +235,7 @@ async function main() {
     }
   });
 
-  await test("delivery counter — disabled settings bump outcome=\"disabled\" on every channel", async () => {
+  await runner.test("delivery counter — disabled settings bump outcome=\"disabled\" on every channel", async () => {
     // Pins the per-channel outcome attribution: when settings.enabled=0,
     // the dispatcher must record `disabled` on all three channels (not
     // `no_settings`, not silently no-op). Operators alerting on a
@@ -265,7 +265,7 @@ async function main() {
     }
   });
 
-  await test("failure path — webhook 5xx bumps outcome=\"failed\" + enqueues to audit_dlq with rejection snapshot", async () => {
+  await runner.test("failure path — webhook 5xx bumps outcome=\"failed\" + enqueues to audit_dlq with rejection snapshot", async () => {
     // Industry-standard contract: when a notification channel fails,
     // the audit trail MUST survive. The dispatcher writes the failed
     // payload to `audit_dlq` (same DLQ surface the SIEM forwarder uses)
@@ -338,7 +338,7 @@ async function main() {
     assert.ok(ours.lastError, "DLQ row must carry the original error message for triage");
   });
 
-  await test("success path — clean dispatch does NOT enqueue to audit_dlq", async () => {
+  await runner.test("success path — clean dispatch does NOT enqueue to audit_dlq", async () => {
     // Symmetric negative pin to the failure case above. When every
     // channel short-circuits (no settings) or completes successfully,
     // the DLQ row count must NOT grow. Without this pin, a future bug
@@ -367,7 +367,7 @@ async function main() {
       `audit_dlq must NOT grow on a clean dispatch; before=${dlqBefore} after=${dlqAfter}`);
   });
 
-  await test("cooldown stamp — reviewRejectionAlertLastFiredAt is set after dispatch attempt", async () => {
+  await runner.test("cooldown stamp — reviewRejectionAlertLastFiredAt is set after dispatch attempt", async () => {
     // Industry-standard contract: cooldown stamp goes on ATTEMPT, not
     // SUCCESS (matches `workspaces.spendAlertLastFiredAt` semantics).
     // A perma-failing webhook must not bypass the cooldown and spam
@@ -418,7 +418,7 @@ async function main() {
       `cooldown stamp must be within the dispatch window [${t0}, ${t1}], got ${stampedMs}`);
   });
 
-  await test("reviewRejectionNotificationsTotal counter is registered + accepts (channel, outcome) labels", async () => {
+  await runner.test("reviewRejectionNotificationsTotal counter is registered + accepts (channel, outcome) labels", async () => {
     // Pin the cardinality contract: 3 channels × 6 outcomes = 18
     // documented label combinations. A future refactor that drops a
     // label or renames an outcome breaks this test loudly rather than
@@ -440,7 +440,7 @@ async function main() {
     assert.ok(sample.value >= 1, "counter increment must register");
   });
 
-  await test("reviewRejectionsTotal counter is registered + accepts projectId label", async () => {
+  await runner.test("reviewRejectionsTotal counter is registered + accepts projectId label", async () => {
     // B3 — counter carries `{projectId}` label (mirrors the
     // reviewer-collapse counter). Pin the label so a future refactor
     // that drops it fails loudly. Multi-tenant operators query the
@@ -456,7 +456,7 @@ async function main() {
     assert.equal(sample.value, 1, "exactly one increment recorded for this projectId");
   });
 
-  summary("B3 review-rejection-notification");
+  runner.summary("B3 review-rejection-notification");
 }
 
 // AGENTS.md § "Use `createTestContext().createTestRunner()`" — every

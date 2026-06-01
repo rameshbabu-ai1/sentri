@@ -42,7 +42,7 @@ async function main() {
   const env = t.setupEnv({ SKIP_EMAIL_VERIFICATION: "true" });
   const server = app.listen(0);
   const base = `http://127.0.0.1:${server.address().port}`;
-  const { test, summary } = t.createTestRunner();
+  const runner = t.createTestRunner();
   try {
     const { token } = await t.registerAndLogin(base, {
       name: "QA", email: `qa-thr-${Date.now()}@example.com`, password: "Password123!",
@@ -54,7 +54,7 @@ async function main() {
     const projectId = created.json.id;
 
     // ── Item 5: validator accepts the three documented modes ─────────────
-    await test("PATCH accepts 0 (default — always notify)", async () => {
+    await runner.test("PATCH accepts 0 (default — always notify)", async () => {
       const out = await t.req(base, `/api/v1/projects/${projectId}`, {
         method: "PATCH", token, body: { reviewRejectionAlertThreshold: 0 },
       });
@@ -62,7 +62,7 @@ async function main() {
       assert.equal(out.json.reviewRejectionAlertThreshold, 0);
     });
 
-    await test("PATCH accepts -1 (opt-out)", async () => {
+    await runner.test("PATCH accepts -1 (opt-out)", async () => {
       const out = await t.req(base, `/api/v1/projects/${projectId}`, {
         method: "PATCH", token, body: { reviewRejectionAlertThreshold: -1 },
       });
@@ -70,7 +70,7 @@ async function main() {
       assert.equal(out.json.reviewRejectionAlertThreshold, -1);
     });
 
-    await test("PATCH accepts positive integer (operator-tuned noise floor)", async () => {
+    await runner.test("PATCH accepts positive integer (operator-tuned noise floor)", async () => {
       const out = await t.req(base, `/api/v1/projects/${projectId}`, {
         method: "PATCH", token, body: { reviewRejectionAlertThreshold: 5 },
       });
@@ -78,7 +78,7 @@ async function main() {
       assert.equal(out.json.reviewRejectionAlertThreshold, 5);
     });
 
-    await test("PATCH accepts upper-bound 1000 (max documented)", async () => {
+    await runner.test("PATCH accepts upper-bound 1000 (max documented)", async () => {
       const out = await t.req(base, `/api/v1/projects/${projectId}`, {
         method: "PATCH", token, body: { reviewRejectionAlertThreshold: 1000 },
       });
@@ -86,7 +86,7 @@ async function main() {
       assert.equal(out.json.reviewRejectionAlertThreshold, 1000);
     });
 
-    await test("PATCH coerces explicit null → 0 (column default)", async () => {
+    await runner.test("PATCH coerces explicit null → 0 (column default)", async () => {
       const out = await t.req(base, `/api/v1/projects/${projectId}`, {
         method: "PATCH", token, body: { reviewRejectionAlertThreshold: null },
       });
@@ -95,7 +95,7 @@ async function main() {
     });
 
     // ── Item 5 (boundary): validator rejects every documented edge case ──
-    await test("PATCH rejects -2 (below -1 opt-out floor)", async () => {
+    await runner.test("PATCH rejects -2 (below -1 opt-out floor)", async () => {
       const out = await t.req(base, `/api/v1/projects/${projectId}`, {
         method: "PATCH", token, body: { reviewRejectionAlertThreshold: -2 },
       });
@@ -104,28 +104,28 @@ async function main() {
         "error message names the field so frontend can surface it");
     });
 
-    await test("PATCH rejects 1001 (above 1000 documented ceiling)", async () => {
+    await runner.test("PATCH rejects 1001 (above 1000 documented ceiling)", async () => {
       const out = await t.req(base, `/api/v1/projects/${projectId}`, {
         method: "PATCH", token, body: { reviewRejectionAlertThreshold: 1001 },
       });
       assert.equal(out.res.status, 400);
     });
 
-    await test("PATCH rejects non-integer 0.5", async () => {
+    await runner.test("PATCH rejects non-integer 0.5", async () => {
       const out = await t.req(base, `/api/v1/projects/${projectId}`, {
         method: "PATCH", token, body: { reviewRejectionAlertThreshold: 0.5 },
       });
       assert.equal(out.res.status, 400);
     });
 
-    await test("PATCH rejects string 'five'", async () => {
+    await runner.test("PATCH rejects string 'five'", async () => {
       const out = await t.req(base, `/api/v1/projects/${projectId}`, {
         method: "PATCH", token, body: { reviewRejectionAlertThreshold: "five" },
       });
       assert.equal(out.res.status, 400);
     });
 
-    await test("PATCH rejects boolean true", async () => {
+    await runner.test("PATCH rejects boolean true", async () => {
       const out = await t.req(base, `/api/v1/projects/${projectId}`, {
         method: "PATCH", token, body: { reviewRejectionAlertThreshold: true },
       });
@@ -133,7 +133,7 @@ async function main() {
     });
 
     // ── Item 4 (E2E): round-trip through GET ─────────────────────────────
-    await test("E2E — PATCH persists + GET reads back the threshold", async () => {
+    await runner.test("E2E — PATCH persists + GET reads back the threshold", async () => {
       await t.req(base, `/api/v1/projects/${projectId}`, {
         method: "PATCH", token, body: { reviewRejectionAlertThreshold: 7 },
       });
@@ -143,7 +143,7 @@ async function main() {
     });
 
     // ── Item 8 (IDOR): cross-workspace ACL ───────────────────────────────
-    await test("cross-workspace ACL — workspace B admin cannot PATCH workspace A's threshold", async () => {
+    await runner.test("cross-workspace ACL — workspace B admin cannot PATCH workspace A's threshold", async () => {
       // Second user lands in their own workspace (registerAndLogin
       // auto-creates one — see `workspaceRepo.ensureDefaultWorkspaces`).
       // PATCH against the first workspace's projectId must 404, NOT
@@ -165,7 +165,7 @@ async function main() {
         "original project's threshold must survive the cross-workspace attempt");
     });
 
-    summary("B3 review-rejection-threshold-routes");
+    runner.summary("B3 review-rejection-threshold-routes");
   } finally {
     env.restore();
     await new Promise((resolve) => server.close(resolve));

@@ -26,22 +26,22 @@ import { runReviewerAuthorLoop } from "../src/aiProvider/agentLoop.js";
 import { register, agentReviewerCollapsedTotal } from "../src/utils/metrics.js";
 
 const ctx = createTestContext();
-const { test, summary } = ctx.createTestRunner();
+const runner = ctx.createTestRunner();
 
 async function main() {
-  await test("detectReviewerCollapse — null workspaceId returns collapsed:false (fail-open)", () => {
+  await runner.test("detectReviewerCollapse — null workspaceId returns collapsed:false (fail-open)", () => {
     const info = detectReviewerCollapse(null);
     assert.equal(info.collapsed, false);
     assert.equal(info.routeId, null);
     assert.equal(info.model, null);
   });
 
-  await test("detectReviewerCollapse — undefined workspaceId returns collapsed:false", () => {
+  await runner.test("detectReviewerCollapse — undefined workspaceId returns collapsed:false", () => {
     const info = detectReviewerCollapse(undefined);
     assert.equal(info.collapsed, false);
   });
 
-  await test("detectReviewerCollapse — non-existent workspaceId returns collapsed:false (no rows, no throw)", () => {
+  await runner.test("detectReviewerCollapse — non-existent workspaceId returns collapsed:false (no rows, no throw)", () => {
     // Fail-open contract: a workspace that doesn't exist must not be
     // treated as collapsed (would otherwise force every standalone /
     // smoke-test path through heuristic-only review).
@@ -49,7 +49,7 @@ async function main() {
     assert.equal(info.collapsed, false);
   });
 
-  await test("runReviewerAuthorLoop honours reviewerCollapsed:true without breaking terminal contract", async () => {
+  await runner.test("runReviewerAuthorLoop honours reviewerCollapsed:true without breaking terminal contract", async () => {
     const out = await runReviewerAuthorLoop({ tests: [{ id: "t1" }] }, {
       runAuthor: async ({ artifact }) => artifact,
       runReviewer: async () => ({ intent: "accept" }),
@@ -60,7 +60,7 @@ async function main() {
     assert.equal(out.roundsCompleted, 1);
   });
 
-  await test("runReviewerAuthorLoop with reviewerCollapsed:true bypasses runReviewer entirely (zero LLM cost)", async () => {
+  await runner.test("runReviewerAuthorLoop with reviewerCollapsed:true bypasses runReviewer entirely (zero LLM cost)", async () => {
     // Spec contract at `docs/roadmap/AUDIT-ROADMAP.md:476-480`:
     // "Skip all LLM reviewer calls" when collapsed. The loop must
     // NOT invoke the caller-supplied `runReviewer` — even a heuristic
@@ -90,7 +90,7 @@ async function main() {
     assert.equal(out.roundsCompleted, 1);
   });
 
-  await test("runReviewerAuthorLoop with reviewerCollapsed:false runs runReviewer normally (multi-agent semantics preserved)", async () => {
+  await runner.test("runReviewerAuthorLoop with reviewerCollapsed:false runs runReviewer normally (multi-agent semantics preserved)", async () => {
     // Symmetric negative pin: explicit `false` must NOT short-circuit.
     // Operators who forced multi-agent semantics expect the reviewer
     // to actually run.
@@ -107,7 +107,7 @@ async function main() {
     assert.equal(out.outcome, "accept");
   });
 
-  await test("runReviewerAuthorLoop accepts reviewerCollapsed:false (operator forced multi-agent)", async () => {
+  await runner.test("runReviewerAuthorLoop accepts reviewerCollapsed:false (operator forced multi-agent)", async () => {
     const out = await runReviewerAuthorLoop({ tests: [{ id: "t1" }] }, {
       runAuthor: async ({ artifact }) => artifact,
       runReviewer: async () => ({ intent: "accept" }),
@@ -116,7 +116,7 @@ async function main() {
     assert.equal(out.outcome, "accept");
   });
 
-  await test("runReviewerAuthorLoop accepts reviewerCollapsed:null (default, auto-detect)", async () => {
+  await runner.test("runReviewerAuthorLoop accepts reviewerCollapsed:null (default, auto-detect)", async () => {
     // `null` is the documented default — auto-detect via the in-loop
     // `maybeWarnSingleAgentCollapse` path. Without a workspaceId the
     // helper short-circuits.
@@ -128,7 +128,7 @@ async function main() {
     assert.equal(out.outcome, "accept");
   });
 
-  await test("agentReviewerCollapsedTotal counter is registered + accepts projectId label", async () => {
+  await runner.test("agentReviewerCollapsedTotal counter is registered + accepts projectId label", async () => {
     // B3 — counter carries `{projectId}` label so multi-tenant
     // operators can alert on the per-project slice from Prometheus
     // alone. Pinning the label name here so a future refactor that
@@ -145,7 +145,7 @@ async function main() {
     assert.equal(sample.value, 1, "exactly one increment recorded for this projectId");
   });
 
-  summary("B3 reviewer-collapse");
+  runner.summary("B3 reviewer-collapse");
 }
 
 // AGENTS.md § "Use `createTestContext().createTestRunner()`" — every
