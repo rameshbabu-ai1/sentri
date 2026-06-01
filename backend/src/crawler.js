@@ -64,7 +64,7 @@ import { runPostGenerationPipeline, sanitizeRunInputs } from "./pipeline/pipelin
 import { persistGeneratedTests, buildPipelineStats } from "./pipeline/testPersistence.js";
 import { emitRunEvent, log, logWarn, logSuccess } from "./utils/runLogger.js";
 import { emitAgentEvent } from "./aiProvider/agentEventEmitter.js";
-import { setStep } from "./utils/pipelineState.js";
+import { setStep, PIPELINE_STEPS } from "./utils/pipelineState.js";
 import { classifyError } from "./utils/errorClassifier.js";
 import { structuredLog } from "./utils/logFormatter.js";
 import * as runRepo from "./database/repositories/runRepo.js";
@@ -100,33 +100,41 @@ import { crawlPagesTotal, recordRunOutcome } from "./utils/metrics.js"; // INF-0
  * @param {Object} run - mutable; receives `reviewerCollapsed` flag.
  */
 function applyReviewerCollapseGate(project, run) {
-  if (!project?.workspaceId) {
-    run.reviewerCollapsed = false;
-    return;
-  }
-  const info = detectReviewerCollapse(project.workspaceId);
-  run.reviewerCollapsed = info.collapsed ? 1 : 0;
-  if (!info.collapsed) return;
-  try { agentReviewerCollapsedTotal.inc(); } catch { /* best-effort */ }
-  logWarn(run, `⚠ Reviewer collapsed — author + reviewer share provider route ${info.routeId}; this run will use heuristic-only review.`);
-  structuredLog("agent.reviewer_collapsed", {
-    runId: run.id,
-    workspaceId: project.workspaceId,
-    routeId: info.routeId,
-    model: info.model,
-  });
-  emitAgentEvent(run.id, {
-    step: PIPELINE_STEPS.REVIEW,
-    agent: "reviewer",
-    phase: "finding",
-    message: "Reviewer collapsed — author and reviewer share the same provider route. This run will use heuristic-only review.",
-    data: {
-      kind: "reviewer_collapsed",
+  // Default the column-typed value to 0 (INTEGER NOT NULL DEFAULT 0)
+  // regardless of branch. Booleans would crash better-sqlite3 the next
+  // time `runRepo.save(run)` binds this field — same coercion contract
+  // the column docblock on `runRepo.js#INSERT_COLS` documents.
+  run.reviewerCollapsed = 0;
+  if (!project?.workspaceId) return;
+  // Best-effort by contract: a counter / log / emit hiccup must never
+  // crash the crawl-mode pipeline. The structural mutation above (the
+  // `reviewerCollapsed = 0/1` stamp) is the only load-bearing line; the
+  // observability writes below are all advisory.
+  try {
+    const info = detectReviewerCollapse(project.workspaceId);
+    if (!info.collapsed) return;
+    run.reviewerCollapsed = 1;
+    try { agentReviewerCollapsedTotal.inc(); } catch { /* best-effort */ }
+    logWarn(run, `⚠ Reviewer collapsed — author + reviewer share provider route ${info.routeId}; this run will use heuristic-only review.`);
+    structuredLog("agent.reviewer_collapsed", {
+      runId: run.id,
+      workspaceId: project.workspaceId,
       routeId: info.routeId,
       model: info.model,
-    },
-    workspaceId: project.workspaceId,
-  });
+    });
+    emitAgentEvent(run.id, {
+      step: PIPELINE_STEPS.REVIEW,
+      agent: "reviewer",
+      phase: "finding",
+      message: "Reviewer collapsed — author and reviewer share the same provider route. This run will use heuristic-only review.",
+      data: {
+        kind: "reviewer_collapsed",
+        routeId: info.routeId,
+        model: info.model,
+      },
+      workspaceId: project.workspaceId,
+    });
+  } catch { /* best-effort */ }
 }
 
 /**
