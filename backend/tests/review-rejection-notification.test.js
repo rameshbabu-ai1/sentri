@@ -304,4 +304,13 @@ async function main() {
   summary("B3 review-rejection-notification");
 }
 
-main();
+// AGENTS.md § "Use `createTestContext().createTestRunner()`" — every
+// pattern-2 test file MUST surface unhandled rejections from `main()` or
+// CI sees `exit code 1 with zero output` (the silent-CI-hang failure
+// mode pattern 2 was designed to prevent). Mirrors the canonical
+// `auto-approval-routes.test.js:178-181` shape.
+main().catch((err) => {
+  // eslint-disable-next-line no-console
+  console.error("❌ review-rejection-notification failed:", err);
+  process.exit(1);
+});
