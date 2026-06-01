@@ -103,6 +103,12 @@ const files = [
   // notification_settings.enabled gate, and the new metric +
   // activity-type literals.
   "tests/review-rejection-notification.test.js",
+  // B3 (AUDIT-ROADMAP Bundle 3) — route-level + cross-workspace ACL
+  // pins for the `reviewRejectionAlertThreshold` PATCH validator.
+  // Closes the IDOR + boundary gaps surfaced by the industry-standard
+  // review of this PR (items 4, 5, 8 of the operational-surface gap
+  // list — see PR description).
+  "tests/review-rejection-threshold-routes.test.js",
   "tests/agent-orchestrator.test.js",
   // Bundle-A fix #1 — orchestrator threads `replyToId` across supervisor
   // handoffs so the UI timeline can reconstruct the multi-step thread.

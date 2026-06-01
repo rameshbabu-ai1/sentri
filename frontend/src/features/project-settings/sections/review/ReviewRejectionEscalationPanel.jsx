@@ -99,14 +99,22 @@ export default function ReviewRejectionEscalationPanel({ project, canEdit, onToa
       ? "Currently: alert on any review rejection."
       : `Currently: alert when ${current} or more tests are rejected in a single run.`;
 
+  // B3 — stable id so the `<label htmlFor>` ties to the input for
+  // screen-reader landmark navigation. Also drives the `aria-describedby`
+  // hook so screen readers narrate the plain-English summary alongside
+  // the numeric value. WCAG 2.1 SC 1.3.1 (Info and Relationships) +
+  // SC 4.1.3 (Status Messages).
+  const inputId = `review-rejection-threshold-${project.id}`;
+  const summaryId = `${inputId}-summary`;
   return (
     <div className="aap-panel">
       <div>
-        <label className="aap-field-label">
+        <label className="aap-field-label" htmlFor={inputId}>
           Alert threshold (-1 opt-out, 0 always, 1–1000 per-run minimum)
         </label>
         <div className="aap-field-row">
           <input
+            id={inputId}
             type="number"
             min="-1"
             max="1000"
@@ -116,6 +124,14 @@ export default function ReviewRejectionEscalationPanel({ project, canEdit, onToa
             disabled={!canEdit || saving}
             placeholder="0"
             className="aap-input"
+            aria-label="Review-rejection alert threshold"
+            aria-describedby={summaryId}
+            aria-invalid={
+              value.trim() !== "" &&
+              (!Number.isInteger(Number(value.trim())) ||
+                Number(value.trim()) < -1 ||
+                Number(value.trim()) > 1000)
+            }
           />
           <button
             className="btn btn-primary btn-sm"
@@ -126,7 +142,9 @@ export default function ReviewRejectionEscalationPanel({ project, canEdit, onToa
           </button>
         </div>
       </div>
-      <div className="aap-stats">{summary}</div>
+      {/* `role="status"` so screen readers announce the summary change
+          after a successful save without stealing focus. WCAG 4.1.3. */}
+      <div className="aap-stats" id={summaryId} role="status">{summary}</div>
     </div>
   );
 }
