@@ -391,17 +391,29 @@ export const agentToolCallsTotal = new client.Counter({
 // produce independent signal — the reviewer is the author talking to
 // itself at the same temperature against the same prompt vocabulary,
 // so `runReviewerAuthorLoop`'s LLM reviewer pass is skipped in favour
-// of the heuristic `validateTest` path. The counter gives operators
-// a dashboard signal to alert on (e.g. "60% of regressions runs in
-// the last hour collapsed → the workspace needs a distinct reviewer
-// route configured"). Bounded cardinality — no labels.
+// of the heuristic `validateTest` path.
+//
+// `projectId` label gives operators per-project attribution from
+// Prometheus alone (no need to cross-reference with the activity
+// log). Mirrors `app_vision_heal_budget_exhausted_total{projectId,
+// reason}` and `app_run_p95_load_ms{projectId}` — the same pattern
+// for "the gauge is interesting on its own but the per-tenant slice
+// is where operators alert". Cardinality concern: self-hosted Sentri
+// runs single-digit-to-low-hundreds projects per workspace; very
+// large multi-tenant deployments can `relabel_configs`-drop the label
+// at scrape time (documented at `monitoring/prometheus/alerts.yml`
+// alongside the equivalent escape hatch for vision-heal). The
+// equivalent "drop label on scrape" pattern is the industry default
+// (AWS, GCP, Datadog all document this for high-cardinality
+// per-tenant labels).
 //
 // Industry parallel: AWS Config "non-compliant resource" counter +
 // Datadog monitor `notify_audit_log` count — surface the policy
 // violation as a metric, not just a UI badge.
 export const agentReviewerCollapsedTotal = new client.Counter({
   name: "app_agent_reviewer_collapsed_total",
-  help: "B3 (AUDIT-ROADMAP) — runs where the author/reviewer route collapse gate fired, so the LLM reviewer pass was skipped in favour of heuristic-only validation. Sustained non-zero rate means operators should configure a distinct reviewer route in Settings → Agent Roles.",
+  help: "B3 (AUDIT-ROADMAP) — runs where the author/reviewer route collapse gate fired, so the LLM reviewer pass was skipped in favour of heuristic-only validation. Sustained non-zero rate means operators should configure a distinct reviewer route in Settings → Agent Roles. Labelled by projectId for per-project attribution; multi-tenant operators can drop the label via `relabel_configs` at scrape time.",
+  labelNames: ["projectId"],
   registers: [register],
 });
 
@@ -411,9 +423,16 @@ export const agentReviewerCollapsedTotal = new client.Counter({
 // loop. Pair with `app_runs_total` to compute the per-run rejection
 // rate; sustained spikes are a leading signal of reviewer-prompt
 // drift, brittle generation, or a regressed author model.
+//
+// `projectId` label — same rationale as `agentReviewerCollapsedTotal`
+// above. Operators alerting on "which project's reviewer drifted?"
+// need the per-tenant slice; the cross-reference to `activities` is
+// possible but adds 1-3 seconds to every alert investigation. The
+// label closes that gap.
 export const reviewRejectionsTotal = new client.Counter({
   name: "app_review_rejections_total",
-  help: "B3 (AUDIT-ROADMAP) — individual tests discarded by ReviewRejection inside the post-run feedback loop. Pair with app_runs_total for per-run rejection rate.",
+  help: "B3 (AUDIT-ROADMAP) — individual tests discarded by ReviewRejection inside the post-run feedback loop. Labelled by projectId for per-project attribution. Pair with app_runs_total for per-run rejection rate.",
+  labelNames: ["projectId"],
   registers: [register],
 });
 

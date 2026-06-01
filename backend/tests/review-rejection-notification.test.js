@@ -143,13 +143,20 @@ async function main() {
     await fireReviewRejectionNotifications(fakeRun(project.id), project, fakeRejections(1));
   });
 
-  await test("reviewRejectionsTotal counter is registered and bumpable", async () => {
+  await test("reviewRejectionsTotal counter is registered + accepts projectId label", async () => {
+    // B3 — counter carries `{projectId}` label (mirrors the
+    // reviewer-collapse counter). Pin the label so a future refactor
+    // that drops it fails loudly. Multi-tenant operators query the
+    // per-project slice from Prometheus alone — no cross-reference
+    // to the activity log required for alert routing.
     const metric = register.getSingleMetric("app_review_rejections_total");
     assert.ok(metric, "counter must be registered");
-    const before = (await metric.get()).values[0]?.value ?? 0;
-    reviewRejectionsTotal.inc();
-    const after = (await metric.get()).values[0]?.value ?? 0;
-    assert.equal(after, before + 1, `counter should increment by 1; before=${before} after=${after}`);
+    const labelName = `proj-${Date.now()}`;
+    reviewRejectionsTotal.inc({ projectId: labelName });
+    const json = await metric.get();
+    const sample = json.values.find((v) => v.labels?.projectId === labelName);
+    assert.ok(sample, "counter must accept the projectId label");
+    assert.equal(sample.value, 1, "exactly one increment recorded for this projectId");
   });
 
   summary("B3 review-rejection-notification");

@@ -114,7 +114,13 @@ function applyReviewerCollapseGate(project, run) {
     const info = detectReviewerCollapse(project.workspaceId);
     if (!info.collapsed) return;
     run.reviewerCollapsed = 1;
-    try { agentReviewerCollapsedTotal.inc(); } catch { /* best-effort */ }
+    // B3 — `project.id` is the operator-set project identifier (string,
+    // bounded per-workspace cardinality); fall back to empty string on
+    // the rare path where the gate fires without a project context so
+    // the counter still bumps without polluting the series with
+    // `undefined`. Same defensive fallback the run counter uses at
+    // `runRepo.create#metricsRunsTotal.inc({ type: run?.type || "unknown" })`.
+    try { agentReviewerCollapsedTotal.inc({ projectId: project?.id || "" }); } catch { /* best-effort */ }
     logWarn(run, `⚠ Reviewer collapsed — author + reviewer share provider route ${info.routeId}; this run will use heuristic-only review.`);
     structuredLog("agent.reviewer_collapsed", {
       runId: run.id,

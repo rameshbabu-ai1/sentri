@@ -23,6 +23,25 @@ import { api } from "../../../../api.js";
  * accepts integers in `[-1, 1000]`. Values above 1000 are
  * functionally equivalent to opt-out (the loop hard-cap on
  * tests-per-run is well below this).
+ *
+ * @typedef {Object} ReviewRejectionEscalationPanelProject
+ * @property {string} id - Project id (workspace-scoped).
+ * @property {number} [reviewRejectionAlertThreshold] - Current value
+ *   from `projects.reviewRejectionAlertThreshold` (migration 070).
+ *   `null` / `undefined` renders as `0` (the column default — always
+ *   notify). Persists as integer; the panel coerces empty input → 0.
+ *
+ * @typedef {Object} ReviewRejectionEscalationPanelProps
+ * @property {ReviewRejectionEscalationPanelProject} project - Live
+ *   project row from `useProjectSettings()`.
+ * @property {boolean} canEdit - Set to `false` for viewers; disables
+ *   the input + Save button so non-admins can read but not mutate.
+ * @property {(msg: string, kind: ("success"|"error"|"info")) => void} [onToast] -
+ *   Optional toast dispatcher from `useToast()`. Best-effort: panel
+ *   still saves when `onToast` is missing (silent success on the wire).
+ *
+ * @param {ReviewRejectionEscalationPanelProps} props
+ * @returns {JSX.Element}
  */
 export default function ReviewRejectionEscalationPanel({ project, canEdit, onToast }) {
   // Threshold is INTEGER NOT NULL DEFAULT 0 on the column; the

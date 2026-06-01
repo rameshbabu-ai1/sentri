@@ -128,14 +128,21 @@ async function main() {
     assert.equal(out.outcome, "accept");
   });
 
-  await test("agentReviewerCollapsedTotal counter is registered and bumpable", async () => {
+  await test("agentReviewerCollapsedTotal counter is registered + accepts projectId label", async () => {
+    // B3 — counter carries `{projectId}` label so multi-tenant
+    // operators can alert on the per-project slice from Prometheus
+    // alone. Pinning the label name here so a future refactor that
+    // drops it fails loudly instead of silently breaking the
+    // operator's dashboard query.
     const metric = register.getSingleMetric("app_agent_reviewer_collapsed_total");
     assert.ok(metric, "counter must be registered");
 
-    const before = (await metric.get()).values[0]?.value ?? 0;
-    agentReviewerCollapsedTotal.inc();
-    const after = (await metric.get()).values[0]?.value ?? 0;
-    assert.equal(after, before + 1, `counter should increment by 1; before=${before} after=${after}`);
+    const labelName = `proj-${Date.now()}`;
+    agentReviewerCollapsedTotal.inc({ projectId: labelName });
+    const json = await metric.get();
+    const sample = json.values.find((v) => v.labels?.projectId === labelName);
+    assert.ok(sample, "counter must accept the projectId label");
+    assert.equal(sample.value, 1, "exactly one increment recorded for this projectId");
   });
 
   summary("B3 reviewer-collapse");

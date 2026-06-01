@@ -319,6 +319,65 @@ groups:
           summary: "Browser pool {{ $labels.type }} disconnected unexpectedly"
           description: "The pool evicted a cached {{ $labels.type }} browser handle on a `disconnected` event in the last 15 min. Likely Chromium OOM-kill (check cgroup memory pressure) or CDP socket drop. The pool relaunches on the next acquire, but a sustained rate means tests are paying repeated cold-launch latency."
           runbook_url: "https://docs.sentri.dev/guide/observability#browserpooldisconnects"
+  - name: sentri-saas-review-quality
+    rules:
+      # ── B3 reviewer-collapse rate (per-project) ────────────────────────────
+      # Fires when ANY project has the reviewer-collapse gate firing
+      # repeatedly (5+ collapsed runs in 1h). A single collapsed run is
+      # often legitimate (operator running a single-agent demo); sustained
+      # collapse means the workspace's `agent_configs` for `author` +
+      # `reviewer` legitimately point at the same provider route — the
+      # operator should configure a distinct route via Settings → Agent
+      # Roles to restore independent review. Per-project alert routing so
+      # multi-tenant operators page on the specific project (the chip on
+      # RunDetail + Settings banner already surface this in-app; the alert
+      # is for SRE/ops paging when the operator hasn't noticed).
+      #
+      # `for: 0m` because the threshold (`> 5 in 1h`) is itself the
+      # damping — no need for an additional time window. Mirrors the
+      # `AiSpendCapExceeded` and `BrowserPoolDisconnects` patterns.
+      - alert: ReviewerCollapseSpike
+        expr: |
+          sum by (projectId) (
+            increase(app_agent_reviewer_collapsed_total[1h])
+          ) > 5
+        for: 0m
+        labels:
+          severity: warning
+          component: review
+        annotations:
+          summary: "Reviewer collapsed on >5 runs/h for project {{ $labels.projectId }}"
+          description: "Project {{ $labels.projectId }} has had {{ $value }} runs trigger the reviewer-collapse gate in the past hour. The workspace's `author` + `reviewer` agent_configs resolve to the same provider route — the LLM reviewer cannot produce independent signal. Configure a distinct reviewer route via Settings → Agent Roles to restore multi-agent review. Operator-facing surfaces (RunDetail chip + Settings warning banner) are already firing; this alert pages SRE/ops when the operator hasn't responded."
+          runbook_url: "https://docs.sentri.dev/guide/observability#reviewercollapsespike"
+      # ── B3 review-rejection rate (per-project) ─────────────────────────────
+      # Fires when a project's reviewer↔author loop is discarding
+      # >20% of regenerated tests. Sustained spike = reviewer-prompt
+      # drift, brittle generation, or a regressed author model. The
+      # FEA-001 notification path also fires per `reviewRejectionAlertThreshold`,
+      # but that's user-configurable and may be opted out (-1) or set
+      # very high. This SRE-tier alert fires regardless, so the
+      # platform operator sees the trend even when the customer
+      # disabled notifications.
+      #
+      # Numerator: review rejections. Denominator: runs that actually
+      # ran the feedback loop (we approximate via test_run completions
+      # — every test_run with failures triggers the regenerator).
+      # 10m window for fast feedback on author-model regressions.
+      - alert: ReviewRejectionRateHigh
+        expr: |
+          (
+            sum by (projectId) (rate(app_review_rejections_total[10m]))
+            /
+            sum by (projectId) (rate(app_run_outcome_total{type="test_run"}[10m]))
+          ) > 0.20
+        for: 10m
+        labels:
+          severity: warning
+          component: review
+        annotations:
+          summary: "Review-rejection rate >20% on project {{ $labels.projectId }}"
+          description: "Project {{ $labels.projectId }} is discarding {{ $value | humanizePercentage }} of regenerated tests via ReviewRejection. Likely causes: reviewer-prompt drift (validateTest heuristic too strict for the project's pattern), regressed author model (recent provider switch?), or fundamentally brittle generation source (state explorer mode on a CAPTCHA-heavy site). Cross-reference with the `test.review_rejected` rows in the workspace audit log to see the failure-category distribution."
+          runbook_url: "https://docs.sentri.dev/guide/observability#reviewrejectionratehigh"
   - name: sentri-saas-vision-healing
     rules:
       # ── MNT-001 vision-heal budget circuit breaker ─────────────────────────

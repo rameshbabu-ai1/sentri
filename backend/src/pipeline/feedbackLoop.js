@@ -695,13 +695,41 @@ export async function regenerateFailingTest(improvement, signal, options = {}) {
         threadId,
         workspaceId,
         onOutcome: (out) => { capturedOutcome = out; },
-        // B3 (AUDIT-ROADMAP) — propagate the upstream collapse decision
-        // so the loop suppresses its duplicate AI-005c advisory. The
-        // reviewer in this caller is already a heuristic
-        // (`playwright.dryRun` / `validateTest`), so collapsed +
-        // non-collapsed both produce the same LLM cost — but the audit
-        // trail stays clean.
-        reviewerCollapsed: options.reviewerCollapsed === true,
+        // B3 (AUDIT-ROADMAP) — intentionally NOT passing `reviewerCollapsed`
+        // to the loop here. The loop-level `reviewerCollapsed: true` flag
+        // makes `runReviewerAuthorLoop` replace the caller-supplied
+        // `runReviewer` with a synthetic auto-accept (see
+        // `agentLoop.js#runReviewerAuthorLoop`), which is the correct
+        // behaviour for LLM-backed reviewers — collapsed routes can't
+        // produce independent signal so skipping the call avoids burning
+        // tokens. But the reviewer in THIS caller is heuristic-only
+        // (`playwright.dryRun` / `validateTest`): zero LLM cost,
+        // provider-independent quality gate. Forwarding the flag would
+        // bypass `validateTest` entirely, shipping regenerated tests
+        // with brittle selectors / unbalanced brackets / placeholder
+        // URLs / secret-scan hits without any quality check — a much
+        // worse outcome than the duplicate AI-005c advisory the flag
+        // also suppresses.
+        //
+        // The collapse policy still applies to THIS caller through two
+        // other mechanisms:
+        //   1. `skipReviewerEnvelopes` (`feedbackLoop.js:782` below)
+        //      suppresses the `tool_call` / `tool_result` envelope
+        //      writes when `options.reviewerCollapsed === true`, so
+        //      the audit trail still reflects "no independent review
+        //      occurred" per the spec at
+        //      `docs/roadmap/AUDIT-ROADMAP.md:479-480`.
+        //   2. The upstream `crawler.js#applyReviewerCollapseGate`
+        //      stamp on `run.reviewerCollapsed` drives the chip on
+        //      RunDetail + the FEA-001 notification metadata.
+        //
+        // The in-loop AI-005c advisory will fire here when collapse is
+        // auto-detected, but that's correct: this caller does run a
+        // real review loop (just heuristic instead of LLM), so the
+        // advisory message "review loop runs but cannot catch
+        // model-specific blind spots" is accurate — the model is the
+        // same on both sides because the LLM author talks to the
+        // heuristic reviewer, and the operator should still be told.
         // Round ceiling is intentionally NOT pinned by this call site —
         // we let the loop's resolution order (caller > per-workspace
         // `agent_configs.maxReviewRounds` > `DEFAULT_MAX_REVIEW_ROUNDS=3`)
@@ -967,7 +995,14 @@ export async function regenerateFailingTest(improvement, signal, options = {}) {
       // and fire the caller-supplied hook so `applyFeedbackLoop` can
       // accumulate `run.reviewRejectedTests[]` + drive the
       // TEST_REVIEW_REJECTED activity log + FEA-001 notification.
-      try { reviewRejectionsTotal.inc(); } catch { /* best-effort */ }
+      //
+      // `projectId` label: pulled from the test row (`test.projectId`
+      // is set at persistence time and survives the regeneration
+      // path). Empty-string fallback matches the same defensive
+      // convention as `app_runs_total{type=…}` / `agentReviewerCollapsedTotal`
+      // — bumps the counter without polluting the series with
+      // `undefined` on the rare bare-test path (eval harness, CLI).
+      try { reviewRejectionsTotal.inc({ projectId: test?.projectId || "" }); } catch { /* best-effort */ }
       if (onReviewRejection) {
         try {
           onReviewRejection({
