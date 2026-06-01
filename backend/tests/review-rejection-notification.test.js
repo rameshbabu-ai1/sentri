@@ -323,12 +323,18 @@ async function main() {
     // shape for DLQ replay (the inspector reads these fields to render
     // the per-row triage UI).
     const dlqRows = auditDlqRepo.listByWorkspace(workspaceId, { limit: 10 });
+    // `hydrate()` inside `listByWorkspace` parses `rowSnapshot` from
+    // JSON string → object, so we read the object directly (no re-parse).
     const ours = dlqRows.find((r) => {
-      try { return JSON.parse(r.rowSnapshot)?.runId === run.id; }
-      catch { return false; }
+      const snap = typeof r.rowSnapshot === "string"
+        ? (() => { try { return JSON.parse(r.rowSnapshot); } catch { return null; } })()
+        : r.rowSnapshot;
+      return snap?.runId === run.id;
     });
     assert.ok(ours, "audit_dlq row for this run must be findable by runId in rowSnapshot");
-    const snapshot = JSON.parse(ours.rowSnapshot);
+    const snapshot = typeof ours.rowSnapshot === "string"
+      ? JSON.parse(ours.rowSnapshot)
+      : ours.rowSnapshot;
     assert.equal(snapshot.kind, "review_rejection_notification");
     assert.equal(snapshot.channel, "webhook");
     assert.equal(snapshot.projectId, project.id);
