@@ -56,6 +56,11 @@ function rowToProject(row) {
     // 070). Default 0 (always notify) matches the column default; -1
     // means "never notify" (operator opt-out).
     reviewRejectionAlertThreshold: row.reviewRejectionAlertThreshold ?? 0,
+    // AUDIT-ROADMAP B3 — review-rejection notification cooldown timestamp
+    // (migration 071). ISO 8601 string; null when no notification has
+    // fired yet. Read by `fireReviewRejectionNotifications` to debounce
+    // bursts; mirrors `workspaces.spendAlertLastFiredAt` semantics.
+    reviewRejectionAlertLastFiredAt: row.reviewRejectionAlertLastFiredAt || null,
   };
 }
 
@@ -182,7 +187,7 @@ export function create(project) {
  */
 export function update(id, fields) {
   const db = getDatabase();
-  const allowed = ["name", "url", "credentials", "status", "qualityGates", "webVitalsBudgets", "autoApproveThreshold", "iterationCap", "strictPiiFirewall", "piiAllowlist", "visionHealing", "visionHealMaxCallsPerDay", "visionHealMaxCostUsdPerMonth", "oracleEnabled", "reviewerEnabled", "oracleMaxCostUsdPerRun", "reviewerMaxCostUsdPerRun", "coverageEnabled", "sourcemapBaseUrl", "serverCoverageEndpoint", "coverageRegressionThresholdPct", "iframeStrategy", "iframeAllowlist", "hydrationType", "hydrationSelector", "elementTimeoutOverride", "reviewRejectionAlertThreshold"];
+  const allowed = ["name", "url", "credentials", "status", "qualityGates", "webVitalsBudgets", "autoApproveThreshold", "iterationCap", "strictPiiFirewall", "piiAllowlist", "visionHealing", "visionHealMaxCallsPerDay", "visionHealMaxCostUsdPerMonth", "oracleEnabled", "reviewerEnabled", "oracleMaxCostUsdPerRun", "reviewerMaxCostUsdPerRun", "coverageEnabled", "sourcemapBaseUrl", "serverCoverageEndpoint", "coverageRegressionThresholdPct", "iframeStrategy", "iframeAllowlist", "hydrationType", "hydrationSelector", "elementTimeoutOverride", "reviewRejectionAlertThreshold", "reviewRejectionAlertLastFiredAt"];
   const sets = [];
   const params = { id };
   for (const key of allowed) {

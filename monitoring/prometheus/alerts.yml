@@ -363,6 +363,34 @@ groups:
       # ran the feedback loop (we approximate via test_run completions
       # — every test_run with failures triggers the regenerator).
       # 10m window for fast feedback on author-model regressions.
+      # ── B3 notification delivery failure rate ──────────────────────────────
+      # Fires when ≥10% of review-rejection notification dispatches on a
+      # given channel fail over 15 min. Closes the "is the Teams webhook
+      # actually delivering?" visibility gap industry-standard SaaS QA
+      # platforms ship with — operators don't have to grep worker logs to
+      # know an integration is broken. Per-channel routing so a single
+      # bad email recipient doesn't false-indict the Teams webhook.
+      #
+      # 15m window so a transient vendor 503 in a 5m window doesn't page;
+      # 0.10 threshold matches the existing `AiQuotaRejectionRateHigh`
+      # ratio threshold for symmetry. Alerts SRE/ops on the integration
+      # itself, not the underlying signal — the customer-facing
+      # `ReviewRejectionRateHigh` alert above handles the source signal.
+      - alert: ReviewRejectionNotificationFailureRate
+        expr: |
+          (
+            sum by (channel) (rate(app_review_rejection_notifications_total{outcome="failed"}[15m]))
+            /
+            sum by (channel) (rate(app_review_rejection_notifications_total{outcome=~"sent|failed"}[15m]))
+          ) > 0.10
+        for: 15m
+        labels:
+          severity: warning
+          component: review
+        annotations:
+          summary: "Review-rejection notifications failing on {{ $labels.channel }} (>10% over 15m)"
+          description: "{{ $value | humanizePercentage }} of {{ $labels.channel }} review-rejection notification dispatches are failing. The DLQ at `audit_dlq` has retained the failed payloads for replay; check the SIEM DLQ inspector in the workspace settings. Common causes: revoked Teams webhook URL, expired email SMTP credentials, generic webhook endpoint returning 5xx. Operator action: rotate the failing channel's credentials via Settings → Notifications, then admin-replay the DLQ entries."
+          runbook_url: "https://docs.sentri.dev/guide/observability#reviewrejectionnotificationfailurerate"
       - alert: ReviewRejectionRateHigh
         expr: |
           (

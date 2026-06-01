@@ -436,6 +436,37 @@ export const reviewRejectionsTotal = new client.Counter({
   registers: [register],
 });
 
+// B3 (AUDIT-ROADMAP Bundle 3) — review-rejection notification delivery
+// counter. One increment per (channel, outcome) tuple on every
+// `fireReviewRejectionNotifications` dispatch. Closes the visibility
+// gap industry-standard SaaS QA platforms ship with: operators can
+// see "is the Teams webhook actually delivering?" from Prometheus
+// alone, without grepping worker logs.
+//
+// Labels:
+//   • channel  ∈ {teams, email, webhook} — which transport.
+//   • outcome  ∈ {sent, failed, cooldown_skipped, threshold_skipped,
+//                 disabled, no_settings} — the dispatch's terminal
+//                 disposition. `sent` is the success path; everything
+//                 else is a documented skip / failure reason so ops
+//                 can alert on `outcome="failed"` rate per channel.
+//
+// Bounded cardinality: 3 channels × 6 outcomes = 18 series per
+// deployment (no projectId — channel-level signal is global; per-project
+// attribution lives in the audit log + DLQ). Mirrors
+// `app_ai_provider_errors_total{reason}` shape.
+//
+// Industry parallel: Datadog `Monitor.notification.sent`, PagerDuty
+// `incidents.notifications.delivered` — every alerting platform
+// exposes per-channel delivery counters so operators can SLO against
+// the integration itself, not just the source signal.
+export const reviewRejectionNotificationsTotal = new client.Counter({
+  name: "app_review_rejection_notifications_total",
+  help: "B3 (AUDIT-ROADMAP) — review-rejection notification dispatches. `channel` ∈ {teams, email, webhook}; `outcome` ∈ {sent, failed, cooldown_skipped, threshold_skipped, disabled, no_settings}. Alert on `outcome=\"failed\"` rate per channel to detect broken webhooks before customers do.",
+  labelNames: ["channel", "outcome"],
+  registers: [register],
+});
+
 // Bundle-A fix #3 — Reviewer verdict downgrade counter. Increments every
 // time `runReviewerAuthorLoop` downgrades a `request_revision` verdict to
 // `accept` because every issue referenced an unknown testId (none of

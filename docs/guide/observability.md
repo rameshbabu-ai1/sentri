@@ -189,6 +189,16 @@ Triage:
    - **Mixed** — likely a regressed author model. Cross-reference with the project's recent Settings → AI Providers history to see if the route changed recently. Roll back via the audit log if so.
 3. **Cross-reference with `meta.reviewerCollapsed`.** If `true`, the run also tripped the collapse gate; the rejection rate is on heuristic-only review. Fix the collapse first (see `ReviewerCollapseSpike` above) — collapsed runs disproportionately produce rejections because the author has no LLM reviewer feedback to learn from across rounds.
 
+### ReviewRejectionNotificationFailureRate
+Severity: warning.
+Means: more than 10% of review-rejection notification dispatches on a given channel are failing over the last 15 minutes. The B3 notification dispatcher writes to `audit_dlq` on every failure so no audit trail is lost, but operators need to act — the customer-facing rejection signal isn't reaching the channel.
+Triage:
+1. Identify the failing channel from the alert's `channel` label (`teams`, `email`, or `webhook`).
+2. **`teams`** — Teams incoming webhook URLs are tenant-rotatable. Operators commonly rotate the URL without updating Settings → Notifications. Fix: have the workspace admin paste the current Teams webhook URL into the project's notification settings, then admin-replay the `audit_dlq` rows from the SIEM DLQ inspector in the workspace settings.
+3. **`email`** — SMTP credentials expired or the configured `Resend` API key got revoked. Verify via the `[notifications] email review-rejection notification failed for <runId>: <error>` log lines. Rotate via env vars (`RESEND_API_KEY` / SMTP config) and restart the worker.
+4. **`webhook`** — generic webhook endpoint returning 5xx (operator's downstream integration is down) or SSRF rejection (the URL changed to point at a private IP / metadata endpoint). Check the worker log for the exact failure reason; rotate the URL in Settings → Notifications.
+5. **DLQ replay** — once the channel is healthy, replay failed dispatches via the existing SEC-007 DLQ inspector at Settings → Audit → DLQ. The B3 dispatcher uses `auditDlqRepo.enqueue` with the same row shape as SIEM forwarder failures, so the existing replay UI handles both classes transparently.
+
 ### EventLoopLagHigh
 Severity: warning.
 Means: Node event-loop lag above 100ms for 10 min. Process CPU-saturated or running sync work on the main thread.

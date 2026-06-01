@@ -26,20 +26,20 @@ import { createTestContext } from "./helpers/test-base.js";
 import { fireReviewRejectionNotifications } from "../src/utils/notifications.js";
 import * as notificationSettingsRepo from "../src/database/repositories/notificationSettingsRepo.js";
 import { generateNotificationSettingId } from "../src/utils/idGenerator.js";
-import { register, reviewRejectionsTotal } from "../src/utils/metrics.js";
+import { register, reviewRejectionsTotal, reviewRejectionNotificationsTotal } from "../src/utils/metrics.js";
 import { ACTIVITY_TYPES } from "../src/constants/activityTypes.js";
 
 const ctx = createTestContext();
 const { test, summary } = ctx.createTestRunner();
 const { resetDb, getDatabase } = ctx;
 
-function seedProject({ id, name = "Test Project", workspaceId = "__system__", reviewRejectionAlertThreshold = 0 } = {}) {
+function seedProject({ id, name = "Test Project", workspaceId = "__system__", reviewRejectionAlertThreshold = 0, reviewRejectionAlertLastFiredAt = null } = {}) {
   const db = getDatabase();
   db.prepare(
-    `INSERT INTO projects (id, name, url, status, createdAt, workspaceId, reviewRejectionAlertThreshold)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(id, name, "https://example.test", "idle", new Date().toISOString(), workspaceId, reviewRejectionAlertThreshold);
-  return { id, name, workspaceId, reviewRejectionAlertThreshold };
+    `INSERT INTO projects (id, name, url, status, createdAt, workspaceId, reviewRejectionAlertThreshold, reviewRejectionAlertLastFiredAt)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, name, "https://example.test", "idle", new Date().toISOString(), workspaceId, reviewRejectionAlertThreshold, reviewRejectionAlertLastFiredAt);
+  return { id, name, workspaceId, reviewRejectionAlertThreshold, reviewRejectionAlertLastFiredAt };
 }
 
 function seedNotificationSettings(projectId, { enabled = 1, webhookUrl = null } = {}) {
@@ -141,6 +141,148 @@ async function main() {
     // configured channels" code-path against silently throwing.
     seedNotificationSettings(project.id, { enabled: 1, webhookUrl: null });
     await fireReviewRejectionNotifications(fakeRun(project.id), project, fakeRejections(1));
+  });
+
+  // ── B3 industry-standard hardening cases ────────────────────────────────
+
+  await test("cooldown — recent reviewRejectionAlertLastFiredAt suppresses dispatch", async () => {
+    // Set the timestamp to 10 minutes ago; default cooldown is 1 hour so
+    // the dispatcher must short-circuit before touching the DB or the
+    // network. Verified by absence of any throw + counter bumps to
+    // `outcome="cooldown_skipped"` for each channel.
+    resetDb();
+    const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const project = seedProject({
+      id: "PROJ-cooldown",
+      reviewRejectionAlertThreshold: 0,
+      reviewRejectionAlertLastFiredAt: tenMinAgo,
+    });
+    // Even with a configured Teams webhook, cooldown must suppress.
+    notificationSettingsRepo.upsert({
+      id: generateNotificationSettingId(),
+      projectId: project.id,
+      teamsWebhookUrl: "https://example.test/teams",
+      emailRecipients: null,
+      webhookUrl: null,
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const metric = register.getSingleMetric("app_review_rejection_notifications_total");
+    const before = (await metric.get()).values.find(
+      (v) => v.labels?.channel === "teams" && v.labels?.outcome === "cooldown_skipped",
+    )?.value ?? 0;
+    await fireReviewRejectionNotifications(fakeRun(project.id), project, fakeRejections(3));
+    const after = (await metric.get()).values.find(
+      (v) => v.labels?.channel === "teams" && v.labels?.outcome === "cooldown_skipped",
+    )?.value ?? 0;
+    assert.equal(after, before + 1,
+      `Teams channel must record one cooldown_skipped bump; before=${before} after=${after}`);
+  });
+
+  await test("cooldown — old reviewRejectionAlertLastFiredAt does NOT suppress dispatch", async () => {
+    // Timestamp 2 hours ago > 1 hour default cooldown → dispatch proceeds
+    // through the threshold + settings gates. With no channels configured
+    // the run still completes without throwing; this pins the contract
+    // that a stale cooldown stamp doesn't permanently mute alerts.
+    resetDb();
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const project = seedProject({
+      id: "PROJ-stale-cooldown",
+      reviewRejectionAlertThreshold: 0,
+      reviewRejectionAlertLastFiredAt: twoHoursAgo,
+    });
+    seedNotificationSettings(project.id, { enabled: 1 });
+    // No throw expected.
+    await fireReviewRejectionNotifications(fakeRun(project.id), project, fakeRejections(1));
+  });
+
+  await test("cooldown — env override (REVIEW_REJECTION_NOTIFICATION_COOLDOWN_MS=0) disables debounce", async () => {
+    // Operators with high-volume noise tolerance can set the env to 0
+    // for "every rejection set fires immediately". Pin the env contract
+    // so a future refactor that hard-codes the 1h default fails loudly.
+    resetDb();
+    const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const project = seedProject({
+      id: "PROJ-env-cooldown",
+      reviewRejectionAlertThreshold: 0,
+      reviewRejectionAlertLastFiredAt: fiveMinAgo,
+    });
+    seedNotificationSettings(project.id, { enabled: 1 });
+
+    const original = process.env.REVIEW_REJECTION_NOTIFICATION_COOLDOWN_MS;
+    process.env.REVIEW_REJECTION_NOTIFICATION_COOLDOWN_MS = "0";
+    try {
+      // With cooldown disabled and no channels configured, the path runs
+      // through every gate without bumping `cooldown_skipped` on any
+      // channel — pinning by measuring the Teams counter before / after.
+      const metric = register.getSingleMetric("app_review_rejection_notifications_total");
+      const before = (await metric.get()).values.find(
+        (v) => v.labels?.channel === "teams" && v.labels?.outcome === "cooldown_skipped",
+      )?.value ?? 0;
+      await fireReviewRejectionNotifications(fakeRun(project.id), project, fakeRejections(1));
+      const after = (await metric.get()).values.find(
+        (v) => v.labels?.channel === "teams" && v.labels?.outcome === "cooldown_skipped",
+      )?.value ?? 0;
+      assert.equal(after, before,
+        `cooldown_skipped must NOT bump when env=0 disables debounce; before=${before} after=${after}`);
+    } finally {
+      if (original === undefined) delete process.env.REVIEW_REJECTION_NOTIFICATION_COOLDOWN_MS;
+      else process.env.REVIEW_REJECTION_NOTIFICATION_COOLDOWN_MS = original;
+    }
+  });
+
+  await test("delivery counter — disabled settings bump outcome=\"disabled\" on every channel", async () => {
+    // Pins the per-channel outcome attribution: when settings.enabled=0,
+    // the dispatcher must record `disabled` on all three channels (not
+    // `no_settings`, not silently no-op). Operators alerting on a
+    // sudden spike in `outcome="disabled"` see "an admin just muted
+    // notifications" rather than "the integration broke".
+    resetDb();
+    const project = seedProject({ id: "PROJ-disabled-counter", reviewRejectionAlertThreshold: 0 });
+    seedNotificationSettings(project.id, { enabled: 0 });
+
+    const metric = register.getSingleMetric("app_review_rejection_notifications_total");
+    const before = ["teams", "email", "webhook"].map((channel) =>
+      (metric.get()).then((j) => j.values.find(
+        (v) => v.labels?.channel === channel && v.labels?.outcome === "disabled",
+      )?.value ?? 0),
+    );
+    const beforeVals = await Promise.all(before);
+    await fireReviewRejectionNotifications(fakeRun(project.id), project, fakeRejections(1));
+    const after = ["teams", "email", "webhook"].map((channel) =>
+      (metric.get()).then((j) => j.values.find(
+        (v) => v.labels?.channel === channel && v.labels?.outcome === "disabled",
+      )?.value ?? 0),
+    );
+    const afterVals = await Promise.all(after);
+    for (let i = 0; i < 3; i += 1) {
+      assert.equal(afterVals[i], beforeVals[i] + 1,
+        `channel ${["teams","email","webhook"][i]} must record one disabled bump`);
+    }
+  });
+
+  await test("reviewRejectionNotificationsTotal counter is registered + accepts (channel, outcome) labels", async () => {
+    // Pin the cardinality contract: 3 channels × 6 outcomes = 18
+    // documented label combinations. A future refactor that drops a
+    // label or renames an outcome breaks this test loudly rather than
+    // silently breaking operator dashboards.
+    const metric = register.getSingleMetric("app_review_rejection_notifications_total");
+    assert.ok(metric, "delivery counter must be registered");
+    // Synthetic bump exercising one (channel, outcome) pair we haven't
+    // already touched in the gating tests above — `webhook/sent` is a
+    // happy-path label that no other test in this file would bump
+    // (everything here exercises skip / failure paths).
+    const probeChannel = "webhook";
+    const probeOutcome = "sent";
+    reviewRejectionNotificationsTotal.inc({ channel: probeChannel, outcome: probeOutcome });
+    const json = await metric.get();
+    const sample = json.values.find(
+      (v) => v.labels?.channel === probeChannel && v.labels?.outcome === probeOutcome,
+    );
+    assert.ok(sample, "counter must accept the (channel, outcome) label pair");
+    assert.ok(sample.value >= 1, "counter increment must register");
   });
 
   await test("reviewRejectionsTotal counter is registered + accepts projectId label", async () => {

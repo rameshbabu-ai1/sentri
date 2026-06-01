@@ -346,10 +346,58 @@ function testDetailUrl(projectId, testId) {
 export async function fireReviewRejectionNotifications(run, project, rejections) {
   if (!Array.isArray(rejections) || rejections.length === 0) return;
 
+  // Lazy-loaded so this module's top-level import graph stays minimal.
+  // The metrics counter is registered at module load via `utils/metrics.js`;
+  // we import the named export here to avoid circular surface area with
+  // `agentLoop.js` / `feedbackLoop.js` (both transitively touch this file
+  // through the rest of the dispatch chain).
+  const { reviewRejectionNotificationsTotal } = await import("./metrics.js");
+  // Helper: bump the delivery counter best-effort. Wrapped so a metric-
+  // registry hiccup never breaks the dispatch path.
+  const bump = (channel, outcome) => {
+    try { reviewRejectionNotificationsTotal.inc({ channel, outcome }); } catch { /* best-effort */ }
+  };
+
   // Threshold gate. Stored as INTEGER; `null` defaults to 0 (always).
   const threshold = project?.reviewRejectionAlertThreshold ?? 0;
-  if (threshold < 0) return; // operator opt-out
-  if (threshold > 0 && rejections.length < threshold) return;
+  if (threshold < 0) {
+    // Operator opt-out — record the skip so dashboards can show "this
+    // project deliberately mutes alerts" rather than the count looking
+    // like a delivery failure.
+    bump("teams", "threshold_skipped");
+    bump("email", "threshold_skipped");
+    bump("webhook", "threshold_skipped");
+    return;
+  }
+  if (threshold > 0 && rejections.length < threshold) {
+    bump("teams", "threshold_skipped");
+    bump("email", "threshold_skipped");
+    bump("webhook", "threshold_skipped");
+    return;
+  }
+
+  // B3 — per-project cooldown debounce. Mirrors the existing
+  // `workspaces.spendAlertLastFiredAt` pattern in `aiProvider/spendAlert.js`.
+  // Default 1 hour; env-tunable for ops who want tighter or looser noise
+  // floors. Cooldown is per-project (not per-channel) because the rejection
+  // signal itself is project-scoped — three channels firing once each on
+  // the same project within an hour is one operator-visible event, not
+  // three.
+  const cooldownMs = Number.parseInt(process.env.REVIEW_REJECTION_NOTIFICATION_COOLDOWN_MS, 10);
+  const effectiveCooldownMs = Number.isFinite(cooldownMs) && cooldownMs >= 0
+    ? cooldownMs
+    : 60 * 60 * 1000;
+  if (effectiveCooldownMs > 0 && project.reviewRejectionAlertLastFiredAt) {
+    const lastFiredMs = Date.parse(project.reviewRejectionAlertLastFiredAt);
+    if (Number.isFinite(lastFiredMs) && Date.now() - lastFiredMs < effectiveCooldownMs) {
+      bump("teams", "cooldown_skipped");
+      bump("email", "cooldown_skipped");
+      bump("webhook", "cooldown_skipped");
+      console.log(formatLogLine("info", null,
+        `[notifications] Review-rejection notification suppressed for project ${project.id} (cooldown active until ${new Date(lastFiredMs + effectiveCooldownMs).toISOString()})`));
+      return;
+    }
+  }
 
   let settings;
   try {
@@ -357,9 +405,23 @@ export async function fireReviewRejectionNotifications(run, project, rejections)
   } catch (err) {
     console.warn(formatLogLine("warn", null,
       `[notifications] Failed to read settings for project ${project.id}: ${err.message}`));
+    bump("teams", "no_settings");
+    bump("email", "no_settings");
+    bump("webhook", "no_settings");
     return;
   }
-  if (!settings || !settings.enabled) return;
+  if (!settings) {
+    bump("teams", "no_settings");
+    bump("email", "no_settings");
+    bump("webhook", "no_settings");
+    return;
+  }
+  if (!settings.enabled) {
+    bump("teams", "disabled");
+    bump("email", "disabled");
+    bump("webhook", "disabled");
+    return;
+  }
 
   const deepLink = runDetailUrl(run.id);
   const subjectShort = `${rejections.length} test${rejections.length !== 1 ? "s" : ""} discarded by review — ${project.name}`;
@@ -409,19 +471,22 @@ export async function fireReviewRejectionNotifications(run, project, rejections)
       }],
     };
     dispatches.push(
-      safeFetch(settings.teamsWebhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(card),
-        signal: AbortSignal.timeout(10_000),
-      })
-        .then((res) => {
+      _deliverChannel({
+        channel: "teams",
+        send: () => safeFetch(settings.teamsWebhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(card),
+          signal: AbortSignal.timeout(10_000),
+        }).then((res) => {
           if (!res.ok) throw new Error(`Teams webhook returned ${res.status}`);
-          console.log(formatLogLine("info", null,
-            `[notifications] Teams review-rejection notification sent for ${run.id}`));
-        })
-        .catch((err) => console.warn(formatLogLine("warn", null,
-          `[notifications] Teams review-rejection notification failed for ${run.id}: ${err.message}`))),
+        }),
+        workspaceId: project.workspaceId || null,
+        run,
+        project,
+        rejections,
+        bump,
+      }),
     );
   }
 
@@ -446,11 +511,16 @@ export async function fireReviewRejectionNotifications(run, project, rejections)
     const emails = settings.emailRecipients.split(",").map(e => e.trim()).filter(Boolean);
     for (const to of emails) {
       dispatches.push(
-        sendEmail({ to, subject, html, text })
-          .then(() => console.log(formatLogLine("info", null,
-            `[notifications] Email review-rejection notification sent to ${to} for ${run.id}`)))
-          .catch(err => console.warn(formatLogLine("warn", null,
-            `[notifications] Email review-rejection notification failed for ${run.id}: ${err.message}`))),
+        _deliverChannel({
+          channel: "email",
+          send: () => sendEmail({ to, subject, html, text }),
+          workspaceId: project.workspaceId || null,
+          run,
+          project,
+          rejections,
+          bump,
+          extraContext: { recipient: to },
+        }),
       );
     }
   }
@@ -470,23 +540,119 @@ export async function fireReviewRejectionNotifications(run, project, rejections)
       timestamp: new Date().toISOString(),
     };
     dispatches.push(
-      safeFetch(settings.webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(10_000),
-      })
-        .then((res) => {
+      _deliverChannel({
+        channel: "webhook",
+        send: () => safeFetch(settings.webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(10_000),
+        }).then((res) => {
           if (!res.ok) throw new Error(`Webhook returned ${res.status}`);
-          console.log(formatLogLine("info", null,
-            `[notifications] Webhook review-rejection notification sent for ${run.id}`));
-        })
-        .catch(err => console.warn(formatLogLine("warn", null,
-          `[notifications] Webhook review-rejection notification failed for ${run.id}: ${err.message}`))),
+        }),
+        workspaceId: project.workspaceId || null,
+        run,
+        project,
+        rejections,
+        bump,
+      }),
     );
   }
 
   await Promise.allSettled(dispatches);
+
+  // B3 — stamp the cooldown timestamp ONLY when at least one channel
+  // attempted delivery. If every channel short-circuited (no settings,
+  // disabled, threshold/cooldown skip — handled above already) we
+  // never reach this line. If every configured channel FAILED we still
+  // stamp: the operator's intent to be notified was honoured, the
+  // failure is in the DLQ for replay, and we don't want a perma-failing
+  // webhook to bypass the cooldown and spam Teams indefinitely.
+  // Industry pattern: stamp on "attempt", not "success" (matches
+  // `workspaces.spendAlertLastFiredAt` semantics).
+  if (dispatches.length > 0) {
+    try {
+      // Named-export dynamic import; namespace object exposes `update`.
+      const projectRepo = await import("../database/repositories/projectRepo.js");
+      if (typeof projectRepo.update === "function") {
+        projectRepo.update(project.id, {
+          reviewRejectionAlertLastFiredAt: new Date().toISOString(),
+        });
+      }
+    } catch (err) {
+      // Cooldown bookkeeping is best-effort. Worst case: next rejection
+      // round fires another notification within the cooldown window —
+      // annoying but not data-loss. Mirrors the cooldown-write contract
+      // in `spendAlert.js`.
+      console.warn(formatLogLine("warn", null,
+        `[notifications] Failed to stamp reviewRejectionAlertLastFiredAt for project ${project.id}: ${err.message}`));
+    }
+  }
+}
+
+// ── B3 channel-dispatch helper (extracted for cohesion) ─────────────────────
+//
+// Single delivery surface for every B3 notification channel. Wraps the
+// per-channel `send()` closure with:
+//   1. Per-channel delivery counter bumps (`sent` / `failed`).
+//   2. Structured log line on success + on failure (operators can grep
+//      `[notifications] <channel> review-rejection ...` to triage).
+//   3. DLQ enqueue on failure so a transient Teams outage doesn't lose
+//      the audit-trail of "we tried to alert about run X but couldn't".
+//      Replay surface is the existing SEC-007 audit-log DLQ inspector;
+//      same enqueue contract as `dispatchSiemEvent` failures.
+//
+// `extraContext` lets the caller pass channel-specific metadata (e.g.
+// the email recipient) into the DLQ snapshot for triage. Bounded by
+// `auditDlqRepo.enqueue`'s row size limits.
+async function _deliverChannel({
+  channel, send, workspaceId, run, project, rejections, bump, extraContext = {},
+}) {
+  try {
+    await send();
+    bump(channel, "sent");
+    console.log(formatLogLine("info", null,
+      `[notifications] ${channel} review-rejection notification sent for ${run.id}`));
+  } catch (err) {
+    bump(channel, "failed");
+    const msg = err?.message || String(err);
+    console.warn(formatLogLine("warn", null,
+      `[notifications] ${channel} review-rejection notification failed for ${run.id}: ${msg}`));
+    // DLQ enqueue — best-effort. The `rowSnapshot` matches the JSON
+    // webhook payload shape so DLQ replay can re-dispatch by feeding
+    // the row back through `fireReviewRejectionNotifications` with
+    // `cooldown_skipped` semantics bypassed. Bounded payload size
+    // (capped at first 50 rejections to stay under typical DLQ row
+    // limits even on pathological discards).
+    try {
+      // `auditDlqRepo` uses named exports — dynamic import returns the
+      // namespace object directly. Match the same shape the SIEM
+      // forwarder above uses (`import * as auditDlqRepo from ...`).
+      const auditDlqRepo = await import("../database/repositories/auditDlqRepo.js");
+      if (typeof auditDlqRepo.enqueue === "function" && workspaceId) {
+        auditDlqRepo.enqueue({
+          workspaceId,
+          rowSnapshot: {
+            kind: "review_rejection_notification",
+            channel,
+            runId: run.id,
+            projectId: project.id,
+            projectName: project.name,
+            threshold: project?.reviewRejectionAlertThreshold ?? 0,
+            rejections: rejections.slice(0, 50),
+            ...extraContext,
+            failedAt: new Date().toISOString(),
+          },
+          lastError: msg,
+        });
+      }
+    } catch (dlqErr) {
+      // DLQ enqueue itself failed — log loudly so ops see "the audit
+      // trail of failed notifications is itself broken". Doesn't throw.
+      console.error(formatLogLine("error", null,
+        `[notifications] DLQ enqueue failed for ${channel} notification on run ${run.id}: ${dlqErr?.message || dlqErr} (original error: ${msg})`));
+    }
+  }
 }
 
 // ─── SEC-007 Part C: SIEM audit-log forwarder ─────────────────────────────────
