@@ -28,6 +28,8 @@ import * as notificationSettingsRepo from "../src/database/repositories/notifica
 import { generateNotificationSettingId } from "../src/utils/idGenerator.js";
 import { register, reviewRejectionsTotal, reviewRejectionNotificationsTotal } from "../src/utils/metrics.js";
 import { ACTIVITY_TYPES } from "../src/constants/activityTypes.js";
+import * as projectRepo from "../src/database/repositories/projectRepo.js";
+import * as auditDlqRepo from "../src/database/repositories/auditDlqRepo.js";
 
 const ctx = createTestContext();
 const { test, summary } = ctx.createTestRunner();
@@ -261,6 +263,159 @@ async function main() {
       assert.equal(afterVals[i], beforeVals[i] + 1,
         `channel ${["teams","email","webhook"][i]} must record one disabled bump`);
     }
+  });
+
+  await test("failure path — webhook 5xx bumps outcome=\"failed\" + enqueues to audit_dlq with rejection snapshot", async () => {
+    // Industry-standard contract: when a notification channel fails,
+    // the audit trail MUST survive. The dispatcher writes the failed
+    // payload to `audit_dlq` (same DLQ surface the SIEM forwarder uses)
+    // so admins can replay via the existing inspector. Pin both the
+    // counter bump AND the DLQ enqueue here — a future refactor that
+    // drops the DLQ write would silently lose audit data on every
+    // failed Teams dispatch.
+    //
+    // Failure injection: SSRF guard rejects `http://127.0.0.1:1` (loopback
+    // is on the reserved IP block). No real network call required —
+    // `safeFetch` throws synchronously, which is exactly the failure
+    // path we're pinning.
+    resetDb();
+    const workspaceId = "__system__";
+    const project = seedProject({
+      id: "PROJ-failure-dlq",
+      workspaceId,
+      reviewRejectionAlertThreshold: 0,
+    });
+    notificationSettingsRepo.upsert({
+      id: generateNotificationSettingId(),
+      projectId: project.id,
+      teamsWebhookUrl: null,
+      emailRecipients: null,
+      // 127.0.0.1 is RFC 5735 reserved loopback — the SSRF guard rejects
+      // it synchronously before any TCP attempt, giving us a deterministic
+      // failure without flakiness from real network conditions.
+      webhookUrl: "http://127.0.0.1:1/dlq-injection",
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const metric = register.getSingleMetric("app_review_rejection_notifications_total");
+    const failedBefore = (await metric.get()).values.find(
+      (v) => v.labels?.channel === "webhook" && v.labels?.outcome === "failed",
+    )?.value ?? 0;
+    const dlqBefore = auditDlqRepo.countByWorkspace(workspaceId);
+
+    const run = fakeRun(project.id);
+    const rejections = fakeRejections(2);
+    await fireReviewRejectionNotifications(run, project, rejections);
+
+    const failedAfter = (await metric.get()).values.find(
+      (v) => v.labels?.channel === "webhook" && v.labels?.outcome === "failed",
+    )?.value ?? 0;
+    assert.equal(failedAfter, failedBefore + 1,
+      `webhook channel must record one failed bump on SSRF rejection; before=${failedBefore} after=${failedAfter}`);
+
+    const dlqAfter = auditDlqRepo.countByWorkspace(workspaceId);
+    assert.equal(dlqAfter, dlqBefore + 1,
+      `audit_dlq must gain one row when the dispatch fails; before=${dlqBefore} after=${dlqAfter}`);
+
+    // Inspect the enqueued row to confirm the snapshot carries the right
+    // shape for DLQ replay (the inspector reads these fields to render
+    // the per-row triage UI).
+    const dlqRows = auditDlqRepo.listByWorkspace(workspaceId, { limit: 10 });
+    const ours = dlqRows.find((r) => {
+      try { return JSON.parse(r.rowSnapshot)?.runId === run.id; }
+      catch { return false; }
+    });
+    assert.ok(ours, "audit_dlq row for this run must be findable by runId in rowSnapshot");
+    const snapshot = JSON.parse(ours.rowSnapshot);
+    assert.equal(snapshot.kind, "review_rejection_notification");
+    assert.equal(snapshot.channel, "webhook");
+    assert.equal(snapshot.projectId, project.id);
+    assert.equal(snapshot.threshold, 0);
+    assert.equal(Array.isArray(snapshot.rejections), true);
+    assert.equal(snapshot.rejections.length, rejections.length);
+    assert.ok(ours.lastError, "DLQ row must carry the original error message for triage");
+  });
+
+  await test("success path — clean dispatch does NOT enqueue to audit_dlq", async () => {
+    // Symmetric negative pin to the failure case above. When every
+    // channel short-circuits (no settings) or completes successfully,
+    // the DLQ row count must NOT grow. Without this pin, a future bug
+    // that always enqueues (regardless of success) would silently
+    // flood the DLQ with healthy dispatches, hiding real failures.
+    //
+    // We exercise the "no channels configured" success path here
+    // because it produces a clean dispatch (zero `Promise.allSettled`
+    // entries) without needing real network. The cooldown stamp is
+    // tested separately below.
+    resetDb();
+    const workspaceId = "__system__";
+    const project = seedProject({
+      id: "PROJ-clean-dispatch",
+      workspaceId,
+      reviewRejectionAlertThreshold: 0,
+    });
+    // No channels configured (enabled: true, but no Teams/email/webhook)
+    // → dispatcher passes every gate but iterates zero channels.
+    seedNotificationSettings(project.id, { enabled: 1, webhookUrl: null });
+
+    const dlqBefore = auditDlqRepo.countByWorkspace(workspaceId);
+    await fireReviewRejectionNotifications(fakeRun(project.id), project, fakeRejections(1));
+    const dlqAfter = auditDlqRepo.countByWorkspace(workspaceId);
+    assert.equal(dlqAfter, dlqBefore,
+      `audit_dlq must NOT grow on a clean dispatch; before=${dlqBefore} after=${dlqAfter}`);
+  });
+
+  await test("cooldown stamp — reviewRejectionAlertLastFiredAt is set after dispatch attempt", async () => {
+    // Industry-standard contract: cooldown stamp goes on ATTEMPT, not
+    // SUCCESS (matches `workspaces.spendAlertLastFiredAt` semantics).
+    // A perma-failing webhook must not bypass the cooldown and spam
+    // Teams indefinitely. Pin this by:
+    //   1. Confirm the column starts NULL.
+    //   2. Trigger a dispatch (even one that fails on SSRF).
+    //   3. Confirm the column is now an ISO 8601 string within ±2s of
+    //      the call, proving the dispatcher stamped at attempt time.
+    resetDb();
+    const workspaceId = "__system__";
+    const project = seedProject({
+      id: "PROJ-cooldown-stamp",
+      workspaceId,
+      reviewRejectionAlertThreshold: 0,
+      // Explicitly start with NULL so the pre-condition is provable.
+      reviewRejectionAlertLastFiredAt: null,
+    });
+    notificationSettingsRepo.upsert({
+      id: generateNotificationSettingId(),
+      projectId: project.id,
+      teamsWebhookUrl: null,
+      emailRecipients: null,
+      // Same SSRF-reject pattern as the failure-path test — gives a
+      // deterministic attempt that fails post-stamp, so the stamp
+      // assertion proves "attempt, not success" semantics.
+      webhookUrl: "http://127.0.0.1:1/cooldown-stamp",
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    // Pre-condition.
+    const before = projectRepo.getById(project.id);
+    assert.equal(before.reviewRejectionAlertLastFiredAt, null,
+      "test fixture must start with null cooldown stamp");
+
+    const t0 = Date.now();
+    await fireReviewRejectionNotifications(fakeRun(project.id), project, fakeRejections(1));
+    const t1 = Date.now();
+
+    const after = projectRepo.getById(project.id);
+    assert.ok(after.reviewRejectionAlertLastFiredAt,
+      "reviewRejectionAlertLastFiredAt must be non-null after dispatch attempt (cooldown stamp on attempt, not success)");
+    const stampedMs = Date.parse(after.reviewRejectionAlertLastFiredAt);
+    assert.ok(Number.isFinite(stampedMs),
+      `cooldown stamp must be valid ISO 8601, got: ${after.reviewRejectionAlertLastFiredAt}`);
+    assert.ok(stampedMs >= t0 - 1000 && stampedMs <= t1 + 1000,
+      `cooldown stamp must be within the dispatch window [${t0}, ${t1}], got ${stampedMs}`);
   });
 
   await test("reviewRejectionNotificationsTotal counter is registered + accepts (channel, outcome) labels", async () => {
