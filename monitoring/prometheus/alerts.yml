@@ -396,7 +396,7 @@ groups:
           (
             sum by (projectId) (rate(app_review_rejections_total[10m]))
             /
-            sum by (projectId) (rate(app_run_outcome_total{type="test_run"}[10m]))
+            scalar(sum(rate(app_run_outcome_total{type="test_run"}[10m])))
           ) > 0.20
         for: 10m
         labels:
@@ -404,7 +404,7 @@ groups:
           component: review
         annotations:
           summary: "Review-rejection rate >20% on project {{ $labels.projectId }}"
-          description: "Project {{ $labels.projectId }} is discarding {{ $value | humanizePercentage }} of regenerated tests via ReviewRejection. Likely causes: reviewer-prompt drift (validateTest heuristic too strict for the project's pattern), regressed author model (recent provider switch?), or fundamentally brittle generation source (state explorer mode on a CAPTCHA-heavy site). Cross-reference with the `test.review_rejected` rows in the workspace audit log to see the failure-category distribution."
+          description: "Project {{ $labels.projectId }} is discarding {{ $value | humanizePercentage }} of regenerated tests via ReviewRejection. Likely causes: reviewer-prompt drift (validateTest heuristics tightened without matching author-prompt updates), a regressed author model (new model version producing lower-quality code), or a site change that broke the test target permanently. Triage: inspect the most recent run's agent conversation thread in RunDetail for the reviewer's verdict."
           runbook_url: "https://docs.sentri.dev/guide/observability#reviewrejectionratehigh"
   - name: sentri-saas-vision-healing
     rules:
