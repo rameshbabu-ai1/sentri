@@ -60,6 +60,53 @@ async function main() {
     assert.equal(out.roundsCompleted, 1);
   });
 
+  await test("runReviewerAuthorLoop with reviewerCollapsed:true bypasses runReviewer entirely (zero LLM cost)", async () => {
+    // Spec contract at `docs/roadmap/AUDIT-ROADMAP.md:476-480`:
+    // "Skip all LLM reviewer calls" when collapsed. The loop must
+    // NOT invoke the caller-supplied `runReviewer` — even a heuristic
+    // reviewer is replaced with a synthetic auto-accept. Pre-fix the
+    // option only suppressed the in-loop advisory; the LLM/heuristic
+    // reviewer still ran, defeating the cost-skip contract.
+    let reviewerCalls = 0;
+    const out = await runReviewerAuthorLoop({ tests: [{ id: "t1" }] }, {
+      runAuthor: async ({ artifact }) => artifact,
+      runReviewer: async () => {
+        reviewerCalls += 1;
+        // If this fires, the loop didn't honour the collapse contract.
+        // Return a request_revision so the test detects the leak: a
+        // bypassed call would terminate on round 0 with accept, but a
+        // non-bypassed call would extend to round 1.
+        return {
+          intent: "request_revision",
+          artifact: { issues: [{ testId: "t1", problem: "leak detector" }] },
+        };
+      },
+      reviewerCollapsed: true,
+      maxReviewRounds: 3,
+    });
+    assert.equal(reviewerCalls, 0, "runReviewer must NOT be called when reviewerCollapsed is true");
+    assert.equal(out.outcome, "accept");
+    assert.equal(out.round, 0);
+    assert.equal(out.roundsCompleted, 1);
+  });
+
+  await test("runReviewerAuthorLoop with reviewerCollapsed:false runs runReviewer normally (multi-agent semantics preserved)", async () => {
+    // Symmetric negative pin: explicit `false` must NOT short-circuit.
+    // Operators who forced multi-agent semantics expect the reviewer
+    // to actually run.
+    let reviewerCalls = 0;
+    const out = await runReviewerAuthorLoop({ tests: [{ id: "t1" }] }, {
+      runAuthor: async ({ artifact }) => artifact,
+      runReviewer: async () => {
+        reviewerCalls += 1;
+        return { intent: "accept" };
+      },
+      reviewerCollapsed: false,
+    });
+    assert.equal(reviewerCalls, 1, "runReviewer must be called when reviewerCollapsed is false");
+    assert.equal(out.outcome, "accept");
+  });
+
   await test("runReviewerAuthorLoop accepts reviewerCollapsed:false (operator forced multi-agent)", async () => {
     const out = await runReviewerAuthorLoop({ tests: [{ id: "t1" }] }, {
       runAuthor: async ({ artifact }) => artifact,

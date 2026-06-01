@@ -307,18 +307,25 @@ export async function runReviewerAuthorLoop(initialArtifact, {
   //   1. Skips the in-loop AI-005c advisory (the operator already has
   //      the RunDetail chip + Settings warning banner — emitting a
   //      duplicate `agent_event` finding per loop is noise).
-  //   2. Auto-detects collapse via `detectReviewerCollapse` when the
-  //      caller passes `null` AND a workspaceId, so existing callers
-  //      that haven't yet propagated the upstream flag still get
-  //      consistent behaviour. Default `null` (auto-detect) → explicit
-  //      `false` (operator forced multi-agent semantics) → explicit
-  //      `true` (caller asserts collapse).
-  // The actual "skip LLM reviewer calls" decision lives at the
-  // CALLER level — `runReviewer` is a caller-supplied closure, so
-  // the caller's heuristic-vs-LLM choice is what determines cost.
-  // The loop's responsibility is observability symmetry: emit the
-  // structured collapse marker once per loop so the audit trail is
-  // searchable, and let the caller's reviewer closure do the rest.
+  //   2. Substitutes the caller-supplied `runReviewer` with a synthetic
+  //      auto-accept closure on round 0. The author pass STILL runs
+  //      (we need a candidate test), but the LLM-or-heuristic reviewer
+  //      call is suppressed entirely — matching the spec at
+  //      `docs/roadmap/AUDIT-ROADMAP.md:476-480`: "Skip all LLM
+  //      reviewer calls… Do not emit agent_messages envelopes for the
+  //      collapsed path — the audit trail must reflect that no
+  //      independent review occurred."
+  //   3. Default `null` (auto-detect via in-loop advisory) → explicit
+  //      `false` (operator forced multi-agent semantics; reviewer runs
+  //      normally) → explicit `true` (caller asserts collapse; reviewer
+  //      is replaced with auto-accept).
+  //
+  // The substitution happens at loop entry below, so the reviewer
+  // round produces NO `agent_messages` row for the reviewer side
+  // (the synthetic closure returns `{ intent: "accept" }` without
+  // touching the caller's reviewer machinery). The author handoff
+  // envelope still writes — that's the author's work product, not
+  // the absent reviewer's verdict.
   reviewerCollapsed = null,
 } = {}) {
   if (typeof runAuthor !== "function" || typeof runReviewer !== "function") {
@@ -419,7 +426,19 @@ export async function runReviewerAuthorLoop(initialArtifact, {
       replyToId: lastReviewerMsgId,
     });
 
-    const reviewer = await runReviewer({ round, artifact: authorArtifact });
+    // B3 (AUDIT-ROADMAP) — when the caller asserts collapse, replace
+    // the reviewer call with a synthetic auto-accept. Zero LLM cost,
+    // zero envelope row for the reviewer side. The `intent: "accept"`
+    // routes to the same terminal branch below as a real reviewer
+    // accept, so the loop's contract (`outcome: "accept"`, round=0,
+    // roundsCompleted=1) holds — operators reading the result can't
+    // tell from the OUTCOME whether the run was collapsed or not,
+    // but the run-level `run.reviewerCollapsed = 1` stamp + the
+    // upstream `agent_event{kind:"reviewer_collapsed"}` marker make
+    // the collapse visible in the audit trail.
+    const reviewer = reviewerCollapsed === true
+      ? { intent: "accept" }
+      : await runReviewer({ round, artifact: authorArtifact });
     let intent = normalizeVerdict(reviewer);
     let artifact = reviewer?.artifact ?? null;
     if (intent === "request_revision") {
@@ -473,16 +492,24 @@ export async function runReviewerAuthorLoop(initialArtifact, {
         artifact = { ...(artifact || {}), issues: safeIssues };
       }
     }
-    const reviewerMsg = toMessage({
-      runId, threadId, workspaceId,
-      fromRole: "reviewer",
-      toRole: intent === "request_revision" ? "author" : "supervisor",
-      intent,
-      artifact,
-      rationale: reviewer?.rationale || null,
-      round,
-      replyToId: authorMsg?.id || null,
-    });
+    // B3 (AUDIT-ROADMAP) — suppress the reviewer-side envelope write
+    // when collapsed. The spec is explicit: "Do not emit agent_messages
+    // envelopes for the collapsed path — the audit trail must reflect
+    // that no independent review occurred." Emitting a synthetic
+    // accept row would falsely document a review that never happened.
+    let reviewerMsg = null;
+    if (reviewerCollapsed !== true) {
+      reviewerMsg = toMessage({
+        runId, threadId, workspaceId,
+        fromRole: "reviewer",
+        toRole: intent === "request_revision" ? "author" : "supervisor",
+        intent,
+        artifact,
+        rationale: reviewer?.rationale || null,
+        round,
+        replyToId: authorMsg?.id || null,
+      });
+    }
     lastReviewerMsgId = reviewerMsg?.id || null;
 
     // A full author↔reviewer round-trip just finished. Bump

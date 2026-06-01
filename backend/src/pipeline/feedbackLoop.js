@@ -771,6 +771,18 @@ export async function regenerateFailingTest(improvement, signal, options = {}) {
           // is preserved for environments where the tool dispatch
           // isn't reachable (e.g. unit tests that DI a synthetic
           // reviewer).
+          //
+          // B3 (AUDIT-ROADMAP) — when the upstream collapse gate flagged
+          // this run, the spec at `docs/roadmap/AUDIT-ROADMAP.md:479-480`
+          // requires us to NOT emit `agent_messages` envelopes for the
+          // reviewer round: "the audit trail must reflect that no
+          // independent review occurred". The dryRun still executes
+          // (operators want the heuristic verdict regardless), but the
+          // envelope writes that would otherwise populate the
+          // run-detail tool-call timeline are skipped — making the
+          // collapsed run visibly distinct from a healthy multi-agent
+          // run in the audit trail.
+          const skipReviewerEnvelopes = options.reviewerCollapsed === true;
           let issues = [];
           let toolDispatched = false;
           if (candidate.playwrightCode && _runId && workspaceId) {
@@ -790,22 +802,24 @@ export async function regenerateFailingTest(improvement, signal, options = {}) {
             // candidate has no id yet.
             const toolCallId = `dryrun-${_runId}-${candidate.id || "unknown"}-${round}`;
             try {
-              emitToolEnvelope({
-                id: toolCallId, runId: _runId, workspaceId, threadId,
-                traceId: getCurrentTraceId() || `trace-${_runId}`,
-                fromRole: "reviewer", toRole: "reviewer", intent: "tool_call",
-                artifact: {
-                  tool: "playwright.dryRun",
-                  // AUTO-023 B5 — gap #8: redact secrets from the
-                  // persisted envelope (raw testCode still flows
-                  // through `executeAgentTool` below for the real
-                  // dryRun, but the DB row + UI timeline see only
-                  // the scrubbed form).
-                  args: redactToolArgsForPersistence("playwright.dryRun", { testCode: candidate.playwrightCode }),
-                },
-                rationale: `Round ${round + 1} static check`, round,
-                replyToId: null, createdAt: new Date().toISOString(),
-              });
+              if (!skipReviewerEnvelopes) {
+                emitToolEnvelope({
+                  id: toolCallId, runId: _runId, workspaceId, threadId,
+                  traceId: getCurrentTraceId() || `trace-${_runId}`,
+                  fromRole: "reviewer", toRole: "reviewer", intent: "tool_call",
+                  artifact: {
+                    tool: "playwright.dryRun",
+                    // AUTO-023 B5 — gap #8: redact secrets from the
+                    // persisted envelope (raw testCode still flows
+                    // through `executeAgentTool` below for the real
+                    // dryRun, but the DB row + UI timeline see only
+                    // the scrubbed form).
+                    args: redactToolArgsForPersistence("playwright.dryRun", { testCode: candidate.playwrightCode }),
+                  },
+                  rationale: `Round ${round + 1} static check`, round,
+                  replyToId: null, createdAt: new Date().toISOString(),
+                });
+              }
               const out = await executeAgentTool({
                 tool: "playwright.dryRun",
                 args: { testCode: candidate.playwrightCode },
@@ -817,25 +831,7 @@ export async function regenerateFailingTest(improvement, signal, options = {}) {
                 signal,
               });
               issues = Array.isArray(out?.result?.diagnostics) ? out.result.diagnostics : [];
-              emitToolEnvelope({
-                runId: _runId, workspaceId, threadId,
-                traceId: getCurrentTraceId() || `trace-${_runId}`,
-                fromRole: "reviewer", toRole: "reviewer", intent: "tool_result",
-                artifact: {
-                  toolCallId,
-                  tool: "playwright.dryRun",
-                  result: { ok: out?.result?.ok === true, issueCount: issues.length },
-                },
-                rationale: "tool_executed", round,
-                replyToId: toolCallId, createdAt: new Date().toISOString(),
-              });
-              toolDispatched = true;
-            } catch (err) {
-              // Tool dispatch failed (forbidden / timeout / unknown) —
-              // fall through to the direct validator below so the
-              // reviewer never silently passes a broken test just
-              // because the tool layer hiccuped.
-              try {
+              if (!skipReviewerEnvelopes) {
                 emitToolEnvelope({
                   runId: _runId, workspaceId, threadId,
                   traceId: getCurrentTraceId() || `trace-${_runId}`,
@@ -843,13 +839,35 @@ export async function regenerateFailingTest(improvement, signal, options = {}) {
                   artifact: {
                     toolCallId,
                     tool: "playwright.dryRun",
-                    error: err?.message || "tool_error",
-                    code: err?.code || null,
+                    result: { ok: out?.result?.ok === true, issueCount: issues.length },
                   },
-                  rationale: "tool_error", round,
+                  rationale: "tool_executed", round,
                   replyToId: toolCallId, createdAt: new Date().toISOString(),
                 });
-              } catch { /* best-effort */ }
+              }
+              toolDispatched = true;
+            } catch (err) {
+              // Tool dispatch failed (forbidden / timeout / unknown) —
+              // fall through to the direct validator below so the
+              // reviewer never silently passes a broken test just
+              // because the tool layer hiccuped.
+              if (!skipReviewerEnvelopes) {
+                try {
+                  emitToolEnvelope({
+                    runId: _runId, workspaceId, threadId,
+                    traceId: getCurrentTraceId() || `trace-${_runId}`,
+                    fromRole: "reviewer", toRole: "reviewer", intent: "tool_result",
+                    artifact: {
+                      toolCallId,
+                      tool: "playwright.dryRun",
+                      error: err?.message || "tool_error",
+                      code: err?.code || null,
+                    },
+                    rationale: "tool_error", round,
+                    replyToId: toolCallId, createdAt: new Date().toISOString(),
+                  });
+                } catch { /* best-effort */ }
+              }
             }
           }
           if (!toolDispatched) {
