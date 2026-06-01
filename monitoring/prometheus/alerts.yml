@@ -391,12 +391,31 @@ groups:
           summary: "Review-rejection notifications failing on {{ $labels.channel }} (>10% over 15m)"
           description: "{{ $value | humanizePercentage }} of {{ $labels.channel }} review-rejection notification dispatches are failing. The DLQ at `audit_dlq` has retained the failed payloads for replay; check the SIEM DLQ inspector in the workspace settings. Common causes: revoked Teams webhook URL, expired email SMTP credentials, generic webhook endpoint returning 5xx. Operator action: rotate the failing channel's credentials via Settings → Notifications, then admin-replay the DLQ entries."
           runbook_url: "https://docs.sentri.dev/guide/observability#reviewrejectionnotificationfailurerate"
+      # ── B3 review-rejection rate (per-project) ─────────────────────────────
+      # Fires when a project's reviewer↔author loop is discarding
+      # >20% of regenerated tests. Sustained spike = reviewer-prompt
+      # drift, brittle generation, or a regressed author model. The
+      # FEA-001 notification path also fires per `reviewRejectionAlertThreshold`,
+      # but that's user-configurable and may be opted out (-1) or set
+      # very high. This SRE-tier alert fires regardless, so the
+      # platform operator sees the trend even when the customer
+      # disabled notifications.
+      #
+      # Both numerator (`app_review_rejections_total{projectId}`) and
+      # denominator (`app_run_outcome_total{type="test_run", projectId}`)
+      # carry the `projectId` label, so `sum by (projectId)` on both
+      # sides produces a correct per-project ratio. The denominator
+      # counts completed test_runs (each of which may reject 0–N tests),
+      # so the ratio is "rejected tests per completed test_run" — a
+      # value above 0.20 means on average each run discards >0.2 tests,
+      # which for a typical 5-test-per-run project means ≥1 rejection
+      # per run sustained over 10 min.
       - alert: ReviewRejectionRateHigh
         expr: |
           (
             sum by (projectId) (rate(app_review_rejections_total[10m]))
             /
-            scalar(sum(rate(app_run_outcome_total{type="test_run"}[10m])))
+            sum by (projectId) (rate(app_run_outcome_total{type="test_run"}[10m]))
           ) > 0.20
         for: 10m
         labels:

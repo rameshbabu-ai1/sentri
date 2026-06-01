@@ -68,8 +68,8 @@ export const runsTotal = new client.Counter({
 
 export const runOutcomeTotal = new client.Counter({
   name: "app_run_outcome_total",
-  help: "Total runs that reached a terminal status. Combined with app_runs_total gives the per-type success rate via PromQL: sum(rate(app_run_outcome_total{status='completed'}[5m])) / sum(rate(app_runs_total[5m])).",
-  labelNames: ["type", "status"],
+  help: "Total runs that reached a terminal status. Combined with app_runs_total gives the per-type success rate via PromQL: sum(rate(app_run_outcome_total{status='completed'}[5m])) / sum(rate(app_runs_total[5m])). B3: `projectId` label added so per-project rejection-rate alerts can use this as the denominator.",
+  labelNames: ["type", "status", "projectId"],
   registers: [register],
 });
 
@@ -296,10 +296,15 @@ export const agentReviewRounds = new client.Histogram({
  */
 export function recordRunOutcome(run, defaultType = "unknown") {
   try {
-    const labels = { type: run?.type || defaultType, status: run?.status || "completed" };
+    const labels = { type: run?.type || defaultType, status: run?.status || "completed", projectId: run?.projectId || "" };
     runOutcomeTotal.inc(labels);
+    // Duration histogram keeps the original (type, status) label set —
+    // adding projectId to a histogram would explode bucket cardinality
+    // (projects × types × statuses × buckets). Operators who need
+    // per-project duration use the `app_run_p95_load_ms{projectId}` gauge.
+    const durationLabels = { type: run?.type || defaultType, status: run?.status || "completed" };
     const seconds = Number(run?.duration || 0) / 1000;
-    if (Number.isFinite(seconds) && seconds >= 0) runDurationSeconds.observe(labels, seconds);
+    if (Number.isFinite(seconds) && seconds >= 0) runDurationSeconds.observe(durationLabels, seconds);
   } catch { /* best-effort */ }
 }
 
