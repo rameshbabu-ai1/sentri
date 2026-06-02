@@ -561,7 +561,7 @@ ALTER TABLE projects ADD COLUMN reviewRejectionAlertThreshold INTEGER DEFAULT 0;
 **Covers sub-items:** RLY-004 (session recovery mid-run), SCL-001 (TOTP on
 target app)
 
-**Status:** 🔲 Planned | **Effort:** M | **Source:** Audit §J Scenario 2 · §B.1
+**Status:** 🔲 Inprogress | **Effort:** M | **Source:** Audit §J Scenario 2 · §B.1
 
 > **Note:** SEC-004 ✅ (PR #10) shipped Sentri's *own* MFA (TOTP + WebAuthn).
 > This bundle targets MFA on the **application under test** — a completely
