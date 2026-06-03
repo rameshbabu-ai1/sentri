@@ -722,92 +722,89 @@ export async function executeTest(test, browser, runId, stepIndex, runStart, opt
         const body = extractTestBody(test.playwrightCode);
         const codeAlreadyNavigates = body.includes("page.goto(");
 
+        // B4 / RLY-004 — proactive session keep-alive ticker + auth-redirect
+        // detection. Lifted OUTSIDE the `!codeAlreadyNavigates` block so they
+        // activate for ALL tests (including those with explicit page.goto).
+        // The ticker keeps the SUT's session cookie alive during long-running
+        // tests regardless of navigation strategy; the auth-redirect check
+        // fires after the framework goto (below) for non-navigating tests.
+        let projectForAuth = null;
+        try { projectForAuth = test.projectId ? projectRepo.getById(test.projectId) : null; }
+        catch { /* repo blip — fall through with no recovery */ }
+
+        // B4 / RLY-004 — proactive session keep-alive ticker. When the
+        // project has `sessionRefreshIntervalMs` configured, register a
+        // per-test setInterval that navigates back to `project.url`
+        // every N ms. Industry-standard "session ping" pattern (Auth0
+        // Universal Login, Okta sessionRefresh, Salesforce
+        // session.refresh) — keeps the SUT's idle cookie alive on long
+        // runs without waiting for a redirect-to-login.
+        //
+        // Best-effort: any goto error is swallowed (`.catch(() => {})`)
+        // because (a) we own no recovery path here — the next user
+        // action falls through to the reactive `restoreAuthSession`
+        // check above, and (b) a ping that occasionally fails during a
+        // navigation race must never fail the test. Bounded by the
+        // route-layer [60_000, 86_400_000] gate so a typo can't flood
+        // the SUT. Cleared in the `finally` block below alongside the
+        // other per-test timers.
+        if (Number.isInteger(projectForAuth?.sessionRefreshIntervalMs)
+            && projectForAuth.sessionRefreshIntervalMs >= 60_000
+            && projectForAuth.url) {
+          const intervalMs = projectForAuth.sessionRefreshIntervalMs;
+          // BUG-FIX (lifeguard): the previous design pinged the SAME
+          // page the test was driving. Even with the `inFlight` latch,
+          // the goto could race a mid-action wait — destroying the
+          // DOM the test expected and surfacing as a confusing
+          // `SELECTOR_ISSUE` / `NAVIGATION_FAIL`. Fix: open a SECOND
+          // page in the SAME BrowserContext. The cookie jar is shared
+          // (same context = same `Cookie` header on every request), so
+          // a navigation on the refresh page keeps the test's session
+          // alive WITHOUT touching the test page's DOM. Industry
+          // pattern: this is what Auth0 / Okta SDKs do under the hood
+          // for "session ping" (Playwright `BrowserContext` is
+          // explicitly designed for multi-tab session sharing).
+          sessionRefreshTicker = setInterval(() => {
+            // Per-tick re-entrance guard. If the previous tick is
+            // still navigating (slow target, 30s timeout), skip this
+            // one rather than queueing — operators set this for
+            // long-running runs, not tight polling.
+            if (sessionRefreshInFlight) return;
+            if (context.pages?.()?.length === 0) return; // context closing
+            sessionRefreshInFlight = true;
+            Promise.resolve()
+              .then(async () => {
+                // Open + close a fresh page per tick so we never hold
+                // a long-lived background tab (which would show up as
+                // a popup in `context.pages()` and confuse the
+                // popup-cleanup loop in `finally` below). Cost: ~50ms
+                // per ping for the page create/close round-trip;
+                // negligible against the minimum 60s interval.
+                const refreshPage = await context.newPage();
+                try {
+                  await refreshPage.goto(projectForAuth.url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+                } finally {
+                  await refreshPage.close().catch(() => {});
+                }
+              })
+              .catch(() => { /* best-effort — never fails the test */ })
+              .finally(() => { sessionRefreshInFlight = false; });
+          }, intervalMs);
+          // Stop the ticker from keeping the worker alive past the
+          // test boundary if the cleanup `finally` somehow doesn't
+          // fire (e.g. uncaught crash in the codeRunner host). The
+          // `clearInterval` in `finally` is still the authoritative
+          // teardown — this is defence-in-depth.
+          sessionRefreshTicker.unref?.();
+        }
+
         if (!codeAlreadyNavigates) {
           await page.goto(test.sourceUrl, { waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT });
           await page.waitForTimeout(800);
-          // B4 / RLY-004 — auth-session-expiry detection. If the SUT
-          // redirected our auth-gated navigation to a login / session-
-          // expired page, the project's stored credentials let us recover
-          // in-place and continue execution. The check is opt-in via
-          // `project.credentials`: no credentials → no recovery attempt
-          // (a test that landed on `/login` deliberately wasn't auth-
-          // gated, so the post-test assertions should run against
-          // whatever the SUT served). The recovery itself is best-effort
-          // — if it fails we surface a structured `_authSessionExpired`
-          // marker on the error so `feedbackLoop.js` classifies the
-          // result as `AUTH_EXPIRED` (skipped from regeneration) rather
-          // than `NAVIGATION_FAIL` (which would burn the
-          // self-healing waterfall + auto-regen path on what is really
-          // an environmental issue).
-          let projectForAuth = null;
-          try { projectForAuth = test.projectId ? projectRepo.getById(test.projectId) : null; }
-          catch { /* repo blip — fall through with no recovery */ }
-          // B4 / RLY-004 — proactive session keep-alive ticker. When the
-          // project has `sessionRefreshIntervalMs` configured, register a
-          // per-test setInterval that navigates back to `project.url`
-          // every N ms. Industry-standard "session ping" pattern (Auth0
-          // Universal Login, Okta sessionRefresh, Salesforce
-          // session.refresh) — keeps the SUT's idle cookie alive on long
-          // runs without waiting for a redirect-to-login.
-          //
-          // Best-effort: any goto error is swallowed (`.catch(() => {})`)
-          // because (a) we own no recovery path here — the next user
-          // action falls through to the reactive `restoreAuthSession`
-          // check above, and (b) a ping that occasionally fails during a
-          // navigation race must never fail the test. Bounded by the
-          // route-layer [60_000, 86_400_000] gate so a typo can't flood
-          // the SUT. Cleared in the `finally` block below alongside the
-          // other per-test timers.
-          if (Number.isInteger(projectForAuth?.sessionRefreshIntervalMs)
-              && projectForAuth.sessionRefreshIntervalMs >= 60_000
-              && projectForAuth.url) {
-            const intervalMs = projectForAuth.sessionRefreshIntervalMs;
-            // BUG-FIX (lifeguard): the previous design pinged the SAME
-            // page the test was driving. Even with the `inFlight` latch,
-            // the goto could race a mid-action wait — destroying the
-            // DOM the test expected and surfacing as a confusing
-            // `SELECTOR_ISSUE` / `NAVIGATION_FAIL`. Fix: open a SECOND
-            // page in the SAME BrowserContext. The cookie jar is shared
-            // (same context = same `Cookie` header on every request), so
-            // a navigation on the refresh page keeps the test's session
-            // alive WITHOUT touching the test page's DOM. Industry
-            // pattern: this is what Auth0 / Okta SDKs do under the hood
-            // for "session ping" (Playwright `BrowserContext` is
-            // explicitly designed for multi-tab session sharing).
-            sessionRefreshTicker = setInterval(() => {
-              // Per-tick re-entrance guard. If the previous tick is
-              // still navigating (slow target, 30s timeout), skip this
-              // one rather than queueing — operators set this for
-              // long-running runs, not tight polling.
-              if (sessionRefreshInFlight) return;
-              if (context.pages?.()?.length === 0) return; // context closing
-              sessionRefreshInFlight = true;
-              Promise.resolve()
-                .then(async () => {
-                  // Open + close a fresh page per tick so we never hold
-                  // a long-lived background tab (which would show up as
-                  // a popup in `context.pages()` and confuse the
-                  // popup-cleanup loop in `finally` below). Cost: ~50ms
-                  // per ping for the page create/close round-trip;
-                  // negligible against the minimum 60s interval.
-                  const refreshPage = await context.newPage();
-                  try {
-                    await refreshPage.goto(projectForAuth.url, { waitUntil: "domcontentloaded", timeout: 30_000 });
-                  } finally {
-                    await refreshPage.close().catch(() => {});
-                  }
-                })
-                .catch(() => { /* best-effort — never fails the test */ })
-                .finally(() => { sessionRefreshInFlight = false; });
-            }, intervalMs);
-            // Stop the ticker from keeping the worker alive past the
-            // test boundary if the cleanup `finally` somehow doesn't
-            // fire (e.g. uncaught crash in the codeRunner host). The
-            // `clearInterval` in `finally` is still the authoritative
-            // teardown — this is defence-in-depth.
-            sessionRefreshTicker.unref?.();
-          }
-
+          // B4 / RLY-004 — auth-session-expiry detection after the
+          // framework goto. Only fires for non-self-navigating tests
+          // because self-navigating tests do their own page.goto() and
+          // may legitimately land on /login as part of the test flow.
           if (projectForAuth?.credentials && looksLikeAuthRedirect(page.url())) {
             console.warn(formatLogLine("warn", runId,
               `[executeTest] Auth redirect detected after goto ${test.sourceUrl} → ${page.url()} — attempting session recovery`));
