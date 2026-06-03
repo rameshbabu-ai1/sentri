@@ -1157,6 +1157,34 @@ export default function ReviewQueue() {
                               · {worstLabel}
                             </span>
                           )}
+                          {/* AUDIT-ROADMAP B6 — quality-gate chips. Render
+                              inline in the row meta line so reviewers see
+                              the gate verdict alongside the existing
+                              quality / type / project badges. All three
+                              chips are independently opt-in (per-project
+                              `dryRunGate` / `semanticReview` toggles); a
+                              test where the gates didn't run carries NULL
+                              columns and the chip simply doesn't render. */}
+                          {t.dryRunStatus === "failed" && (
+                            <span className="badge badge-red badge--xs" title={t.dryRunError || "Dry-run failed"}>
+                              ⚠ Dry run failed
+                            </span>
+                          )}
+                          {t.dryRunStatus === "trivial" && (
+                            <span className="badge badge-amber badge--xs" title="Test completed in <200ms with zero network requests — likely no real assertion">
+                              ⚠ Trivial
+                            </span>
+                          )}
+                          {Number.isInteger(t.semanticReviewScore) && t.semanticReviewScore < 50 && (
+                            <span className="badge badge-red badge--xs" title="Semantic reviewer flagged this test as low-value">
+                              ⚠ Semantic reject
+                            </span>
+                          )}
+                          {Number.isInteger(t.semanticReviewScore) && t.semanticReviewScore >= 50 && t.semanticReviewScore < 80 && (
+                            <span className="badge badge-amber badge--xs" title="Semantic reviewer suggested revisions">
+                              ⚠ Semantic revise
+                            </span>
+                          )}
                         </div>
                       </div>
 

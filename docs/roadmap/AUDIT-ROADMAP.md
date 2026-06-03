@@ -701,7 +701,7 @@ error codes); RunDetail 🔗 badge; TestDetail "Depends on" multi-select.
 **Covers sub-items:** QAL-001 (dry-run gate), QAL-005 (semantic reviewer),
 QAL-002 (fixture/state isolation), QAL-010 (unique test data / faker)
 
-**Status:** 🔲 Inprogress | **Effort:** XL | **Source:** Audit §D.2 · §E.3
+**Status:** 🔄 In Progress | **Effort:** XL | **Source:** Audit §D.2 · §E.3
 
 **Problem:**
 
@@ -1224,7 +1224,7 @@ collapsed), AUTO-023 ✅ (oracle agent role + tool registry), AUTO-009 ✅
 | B3 — Reviewer independence + escalation | RLY-003, QAL-004 | 🔴 P0 | M | ✅ Complete (this PR) |
 | B4 — Auth recovery + target-app TOTP | RLY-004, SCL-001 | 🔴 P0 | M | ✅ Complete (this PR) |
 | B5 — Test dependency ordering | AUTO-014 | 🟡 P1 | M | ✅ Complete |
-| B6 — Test quality gates | QAL-001, QAL-005, QAL-002, QAL-010 | 🟡 P1 | XL | 🔲 Planned |
+| B6 — Test quality gates | QAL-001, QAL-005, QAL-002, QAL-010 | 🟡 P1 | XL | 🔄 In Progress (this PR) |
 | B7 — Healing safety + context robustness | QAL-006, QAL-007, QAL-008, QAL-009, QAL-011 | 🟡 P1 | L | 🔲 Planned |
 | B8 — Goal-based autonomy + coverage | GOL-001, SCL-004, AUTO-011, AUTO-021 | 🟢 Strategic | XL | 🔲 Planned |
 
