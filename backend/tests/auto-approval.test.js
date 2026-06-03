@@ -50,7 +50,12 @@ async function main() {
   {
     const run = makeRun();
     const project = makeProject({ autoApproveThreshold: null });
-    const ids = persistGeneratedTests([makeTest(0.95)], project, run);
+    // AUDIT-ROADMAP B6 — `persistGeneratedTests` is async (opt-in dry-run
+    // gate per QAL-001 launches `browserPool` leases per test). Even when
+    // the gate is disabled (the default + this unit-test path), the function
+    // is async so callers must `await`. The legacy sync invocation now
+    // returns the unresolved Promise and `ids[0]` is `undefined`.
+    const ids = await persistGeneratedTests([makeTest(0.95)], project, run);
     const saved = testRepo.getById(ids[0]);
     assert.equal(saved.reviewStatus, "draft");
     assert.equal(saved.approvalSource, null);
@@ -59,7 +64,7 @@ async function main() {
   {
     const run = makeRun();
     const project = makeProject({ autoApproveThreshold: 0.8 });
-    const ids = persistGeneratedTests([makeTest(0.4)], project, run);
+    const ids = await persistGeneratedTests([makeTest(0.4)], project, run);
     const saved = testRepo.getById(ids[0]);
     assert.equal(saved.reviewStatus, "draft");
   }
@@ -67,7 +72,7 @@ async function main() {
   {
     const run = makeRun();
     const project = makeProject({ autoApproveThreshold: 0.8 });
-    const ids = persistGeneratedTests([makeTest(0.9)], project, run);
+    const ids = await persistGeneratedTests([makeTest(0.9)], project, run);
     const saved = testRepo.getById(ids[0]);
     assert.equal(saved.reviewStatus, "approved");
     assert.equal(saved.approvalSource, "auto");
@@ -85,7 +90,7 @@ async function main() {
   {
     const run = makeRun();
     const project = makeProject({ autoApproveThreshold: 0.8 });
-    const ids = persistGeneratedTests([makeTest(0.95)], project, run);
+    const ids = await persistGeneratedTests([makeTest(0.95)], project, run);
     const before = testRepo.getById(ids[0]);
     assert.equal(before.reviewStatus, "approved");
     assert.equal(before.approvalSource, "auto");
@@ -124,7 +129,7 @@ async function main() {
   {
     const run = makeRun();
     const project = makeProject({ autoApproveThreshold: null });
-    const ids = persistGeneratedTests([makeTest(0.5)], project, run);
+    const ids = await persistGeneratedTests([makeTest(0.5)], project, run);
     // Simulate a human approval (mirrors PATCH /projects/:id/tests/:testId/approve).
     testRepo.update(ids[0], { reviewStatus: "approved", reviewedAt: new Date().toISOString() });
     testRepo.update(ids[0], {
@@ -148,7 +153,7 @@ async function main() {
   {
     const run = makeRun();
     const project = makeProject({ autoApproveThreshold: 0.8 });
-    const ids = persistGeneratedTests([makeTest(0.95)], project, run);
+    const ids = await persistGeneratedTests([makeTest(0.95)], project, run);
     const before = testRepo.getById(ids[0]);
     assert.equal(before.reviewStatus, "approved");
     assert.equal(before.approvalSource, "auto");
@@ -186,7 +191,7 @@ async function main() {
       delete process.env.DISABLE_AUTO_APPROVAL;
       const baselineRun = makeRun();
       const baselineProject = makeProject({ autoApproveThreshold: 0.8 });
-      const baselineIds = persistGeneratedTests([makeTest(0.95)], baselineProject, baselineRun);
+      const baselineIds = await persistGeneratedTests([makeTest(0.95)], baselineProject, baselineRun);
       assert.equal(testRepo.getById(baselineIds[0]).reviewStatus, "approved");
 
       // Kill-switch on: same project, same high-confidence test, lands as draft.
@@ -197,7 +202,7 @@ async function main() {
         process.env.DISABLE_AUTO_APPROVAL = truthy;
         const run = makeRun();
         const project = makeProject({ autoApproveThreshold: 0.8 });
-        const ids = persistGeneratedTests([makeTest(0.95)], project, run);
+        const ids = await persistGeneratedTests([makeTest(0.95)], project, run);
         const saved = testRepo.getById(ids[0]);
         assert.equal(saved.reviewStatus, "draft", `kill-switch=${truthy} should force draft`);
         assert.equal(saved.approvalSource, null, `kill-switch=${truthy} should clear approvalSource`);
@@ -219,7 +224,7 @@ async function main() {
         process.env.DISABLE_AUTO_APPROVAL = falsy;
         const run = makeRun();
         const project = makeProject({ autoApproveThreshold: 0.8 });
-        const ids = persistGeneratedTests([makeTest(0.95)], project, run);
+        const ids = await persistGeneratedTests([makeTest(0.95)], project, run);
         assert.equal(
           testRepo.getById(ids[0]).reviewStatus,
           "approved",
