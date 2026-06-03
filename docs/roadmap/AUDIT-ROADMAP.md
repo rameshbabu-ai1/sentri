@@ -701,7 +701,7 @@ error codes); RunDetail 🔗 badge; TestDetail "Depends on" multi-select.
 **Covers sub-items:** QAL-001 (dry-run gate), QAL-005 (semantic reviewer),
 QAL-002 (fixture/state isolation), QAL-010 (unique test data / faker)
 
-**Status:** 🔲 Planned | **Effort:** XL | **Source:** Audit §D.2 · §E.3
+**Status:** 🔲 Inprogress | **Effort:** XL | **Source:** Audit §D.2 · §E.3
 
 **Problem:**
 
