@@ -431,12 +431,40 @@ export function createTestRunner() {
 
     const timeoutMs = Number.isFinite(opts.timeout) ? opts.timeout : DEFAULT_TEST_TIMEOUT_MS;
     const startedAt = Date.now();
+
+    // Bug-fix (post-migration): try the body synchronously FIRST. Pre-migration
+    // the inline `function test(name, fn) { try { fn(); … } catch { … } }` ran
+    // every sync body inline — files relied on this to do
+    //     test("seed", () => { db.exec("INSERT …") });
+    //     test("assert", () => { db.prepare("SELECT …").get(); });
+    //     db.exec("DELETE FROM projects");   // ← cleanup, runs IMMEDIATELY
+    //     summary("file-label");
+    // …and the cleanup observed both tests' inserts before running. Our
+    // earlier `raceWithTimeout(Promise.resolve().then(fn), …)` always
+    // deferred via a microtask, so the cleanup ran BEFORE either test body
+    // touched the DB → 14 CI failures (FK errors, lost inserts, env-restore
+    // races). The fix below restores the synchronous-by-default contract:
+    //   • sync test bodies run inline (no microtask boundary)
+    //   • bodies that return a Promise still go through the timeout race
+    //   • thrown sync errors still bubble through `.catch()` for stack output
+    let bodyResult;
+    let syncThrew = null;
+    try {
+      bodyResult = fn();
+    } catch (err) {
+      syncThrew = err;
+    }
+    const settled = syncThrew
+      ? Promise.reject(syncThrew)
+      : (bodyResult && typeof bodyResult.then === "function"
+        ? raceWithTimeout(bodyResult, timeoutMs, name)
+        : Promise.resolve(bodyResult));
     // Build the per-test promise eagerly and register it in `pending` so
     // `summary()` can await it without the caller needing to `await test()`.
     // Returned to the caller too — preserves the `await test(...)` pattern
     // for files that DO want sequential ordering (e.g. tests that mutate
     // shared DB state between cases).
-    const promise = raceWithTimeout(Promise.resolve().then(fn), timeoutMs, name)
+    const promise = settled
       .then(() => {
         const elapsed = Date.now() - startedAt;
         passed++;
