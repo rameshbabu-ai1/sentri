@@ -805,7 +805,20 @@ export async function executeTest(test, browser, runId, stepIndex, runStart, opt
           // framework goto. Only fires for non-self-navigating tests
           // because self-navigating tests do their own page.goto() and
           // may legitimately land on /login as part of the test flow.
-          if (projectForAuth?.credentials && looksLikeAuthRedirect(page.url())) {
+          //
+          // Lifeguard bug-fix: skip recovery when the post-goto URL
+          // matches the test's own `sourceUrl`. A test whose sourceUrl
+          // IS a login page (e.g. testing the login form itself) would
+          // otherwise trigger an unnecessary restoreAuthSession cycle
+          // that logs in (navigating away from /login), then navigates
+          // back — and on SUTs that redirect authenticated users away
+          // from /login, the test body runs against the wrong page and
+          // fails with a confusing SELECTOR_ISSUE / ASSERTION_FAIL.
+          // QA.md §E documents this contract: "A test that lands on
+          // /login from a deliberate non-auth-gated assertion → does
+          // NOT trigger restoreAuthSession because the matching URL is
+          // the project's intended sourceUrl."
+          if (projectForAuth?.credentials && looksLikeAuthRedirect(page.url()) && page.url() !== test.sourceUrl) {
             console.warn(formatLogLine("warn", runId,
               `[executeTest] Auth redirect detected after goto ${test.sourceUrl} → ${page.url()} — attempting session recovery`));
             const recovery = await restoreAuthSession(page, projectForAuth, { run: { id: runId } });
