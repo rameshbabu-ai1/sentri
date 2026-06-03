@@ -287,11 +287,17 @@ async function fillTotpField(page, totpSecret, { timeout = 5000, logger } = {}) 
     }
 
     if (attempt === 0) {
-      // Wait for the next 30s window so the retry generates a NEW code
-      // — generateTotpCode reads Date.now() so without a delay we'd
-      // produce an identical code.
-      log("TOTP first attempt did not advance — waiting for next window before retry");
-      await page.waitForTimeout(1500).catch(() => {});
+      // Wait for the next 30s window so the retry generates a NEW code.
+      // `generateTotpCode` computes the step counter from
+      // `Math.floor(Date.now() / 1000 / 30)` — a fixed 1.5s delay only
+      // crosses the 30s boundary ~5% of the time (when we happen to be
+      // in the last 1.5s of the current window). Use a dynamic wait that
+      // reaches the next boundary + 1s margin so the retry is guaranteed
+      // to produce a different code.
+      const nowSec = Math.floor(Date.now() / 1000);
+      const secsUntilNextWindow = 30 - (nowSec % 30) + 1; // +1s margin
+      log(`TOTP first attempt did not advance — waiting ${secsUntilNextWindow}s for next window before retry`);
+      await page.waitForTimeout(secsUntilNextWindow * 1000).catch(() => {});
     }
   }
 
