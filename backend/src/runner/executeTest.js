@@ -675,6 +675,13 @@ export async function executeTest(test, browser, runId, stepIndex, runStart, opt
   // Playwright call continues running until the finally block — which may
   // itself hang if Chromium is unresponsive.
   let testTimeoutHandle;
+  // B4 / RLY-004 — proactive session keep-alive ticker handle, declared
+  // at function scope so the `finally` block below can clear it. Stays
+  // `null` for projects without `sessionRefreshIntervalMs` configured —
+  // the existing per-test cleanup path is bit-for-bit identical to the
+  // pre-B4 behaviour for those (the vast majority of) projects.
+  let sessionRefreshTicker = null;
+  let sessionRefreshInFlight = false;
   const testTimeoutPromise = new Promise((_, reject) => {
     testTimeoutHandle = setTimeout(() => {
       // BUG-0001 — Reject FIRST (synchronously) so `Promise.race` resolves
@@ -735,6 +742,47 @@ export async function executeTest(test, browser, runId, stepIndex, runStart, opt
           let projectForAuth = null;
           try { projectForAuth = test.projectId ? projectRepo.getById(test.projectId) : null; }
           catch { /* repo blip — fall through with no recovery */ }
+          // B4 / RLY-004 — proactive session keep-alive ticker. When the
+          // project has `sessionRefreshIntervalMs` configured, register a
+          // per-test setInterval that navigates back to `project.url`
+          // every N ms. Industry-standard "session ping" pattern (Auth0
+          // Universal Login, Okta sessionRefresh, Salesforce
+          // session.refresh) — keeps the SUT's idle cookie alive on long
+          // runs without waiting for a redirect-to-login.
+          //
+          // Best-effort: any goto error is swallowed (`.catch(() => {})`)
+          // because (a) we own no recovery path here — the next user
+          // action falls through to the reactive `restoreAuthSession`
+          // check above, and (b) a ping that occasionally fails during a
+          // navigation race must never fail the test. Bounded by the
+          // route-layer [60_000, 86_400_000] gate so a typo can't flood
+          // the SUT. Cleared in the `finally` block below alongside the
+          // other per-test timers.
+          if (Number.isInteger(projectForAuth?.sessionRefreshIntervalMs)
+              && projectForAuth.sessionRefreshIntervalMs >= 60_000
+              && projectForAuth.url) {
+            const intervalMs = projectForAuth.sessionRefreshIntervalMs;
+            sessionRefreshTicker = setInterval(() => {
+              // Don't ping while a real navigation is in flight — the
+              // contract is "keep the cookie alive between actions",
+              // not "race the test's own goto". The test body's actions
+              // already exercise the cookie; we only need the ping when
+              // the page would otherwise sit idle.
+              if (page.isClosed?.() || sessionRefreshInFlight) return;
+              sessionRefreshInFlight = true;
+              Promise.resolve()
+                .then(() => page.goto(projectForAuth.url, { waitUntil: "domcontentloaded", timeout: 30_000 }))
+                .catch(() => { /* best-effort — see JSDoc above */ })
+                .finally(() => { sessionRefreshInFlight = false; });
+            }, intervalMs);
+            // Stop the ticker from keeping the worker alive past the
+            // test boundary if the cleanup `finally` somehow doesn't
+            // fire (e.g. uncaught crash in the codeRunner host). The
+            // `clearInterval` in `finally` is still the authoritative
+            // teardown — this is defence-in-depth.
+            sessionRefreshTicker.unref?.();
+          }
+
           if (projectForAuth?.credentials && looksLikeAuthRedirect(page.url())) {
             console.warn(formatLogLine("warn", runId,
               `[executeTest] Auth redirect detected after goto ${test.sourceUrl} → ${page.url()} — attempting session recovery`));
@@ -924,17 +972,6 @@ export async function executeTest(test, browser, runId, stepIndex, runStart, opt
     // (legacy callers that don't carry the structured marker), but
     // setting `status: "skipped"` here is the authoritative signal —
     // it prevents `run.failed++` from incrementing and ensures the
-    // RunDetail UI renders the test with the `auth_expired` chip
-    // rather than the generic red "Failed" badge.
-    // B4 / RLY-004 — auth-session-expiry is an ENVIRONMENTAL failure,
-    // not a test regression. Mark the result as `skipped` with reason
-    // `auth_expired` so the gate evaluator excludes it from the pass-
-    // rate denominator (mirrors `over_budget` / `skipped_no_impact`
-    // semantics in `utils/skipReasons.js`). The feedback loop's
-    // `AUTH_EXPIRED` classifier ALSO catches the error-string path
-    // (legacy callers that don't carry the structured marker), but
-    // setting `status: "skipped"` here is the authoritative signal —
-    // it prevents `run.failed++` from incrementing and ensures the
     // RunDetail UI renders the test with the `auth_expired` chip.
     // We do NOT early-return — the outer `finally` MUST run for
     // resource cleanup (screencast, context, video, downloads dir);
@@ -1106,6 +1143,14 @@ export async function executeTest(test, browser, runId, stepIndex, runStart, opt
 
   } finally {
     clearTimeout(testTimeoutHandle);
+    // B4 / RLY-004 — stop the session-refresh ticker before any page /
+    // context teardown so an in-flight `page.goto(project.url)` ping
+    // can't race against `page.close()` and surface a spurious "Target
+    // closed" error in the cleanup logs.
+    if (sessionRefreshTicker) {
+      clearInterval(sessionRefreshTicker);
+      sessionRefreshTicker = null;
+    }
 
     // AUTO-009 — stop V8 coverage before the page closes so the collector
     // returns the script range list intact. Best-effort: a stop failure

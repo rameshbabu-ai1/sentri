@@ -64,10 +64,11 @@ function rowToProject(row) {
     // AUDIT-ROADMAP B4 / RLY-004 — proactive session keep-alive interval
     // (migration 072). `null` (default) disables the ping entirely so
     // every legacy project stays bit-for-bit identical. When set, the
-    // testRunner spins a `setInterval` ticker per active page that
-    // navigates to `project.url` every N ms to keep server-side sessions
-    // alive on long runs. Bounded at the route layer to [60_000,
-    // 86_400_000] (1 min ≤ interval ≤ 24 h).
+    // testRunner registers a per-page `setInterval` ticker that
+    // navigates to `project.url` every N ms to keep server-side
+    // sessions alive on long runs. Bounded at the route layer to
+    // [60_000, 86_400_000] (1 min ≤ interval ≤ 24 h). Consumer:
+    // `backend/src/runner/executeTest.js#startSessionRefreshTicker`.
     sessionRefreshIntervalMs: row.sessionRefreshIntervalMs ?? null,
   };
 }

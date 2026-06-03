@@ -26,10 +26,16 @@ import { isNonExecutedSkip, NON_EXECUTED_SKIP_REASONS } from "../src/utils/skipR
 import { classifyFailure } from "../src/pipeline/feedbackLoop.js";
 import { encryptCredentials } from "../src/utils/credentialEncryption.js";
 
-const ctx = createTestContext("b4-auth-recovery");
-const test = ctx.createTestRunner();
+// AGENTS.md § "Do not duplicate test helpers" + line 132 pattern 2 — use
+// the canonical `createTestContext().createTestRunner()` runner from
+// `tests/helpers/test-base.js`. Wrap everything in an async main so each
+// async `test()` resolves before `summary()` decides exit code.
+const ctx = createTestContext();
+const { test, summary } = ctx.createTestRunner();
 
-test("looksLikeAuthRedirect matches default login patterns", () => {
+async function main() {
+
+await test("looksLikeAuthRedirect matches default login patterns", () => {
   assert.equal(looksLikeAuthRedirect("https://example.com/login"), true);
   assert.equal(looksLikeAuthRedirect("https://example.com/login?next=/dashboard"), true);
   assert.equal(looksLikeAuthRedirect("https://example.com/signin"), true);
@@ -40,7 +46,7 @@ test("looksLikeAuthRedirect matches default login patterns", () => {
   assert.equal(looksLikeAuthRedirect("https://example.com/unauthorised"), true);
 });
 
-test("looksLikeAuthRedirect rejects unrelated paths", () => {
+await test("looksLikeAuthRedirect rejects unrelated paths", () => {
   assert.equal(looksLikeAuthRedirect("https://example.com/dashboard"), false);
   assert.equal(looksLikeAuthRedirect("https://example.com/billing/invoices"), false);
   assert.equal(looksLikeAuthRedirect("https://example.com/loginhelp"), false); // word-boundary
@@ -49,7 +55,7 @@ test("looksLikeAuthRedirect rejects unrelated paths", () => {
   assert.equal(looksLikeAuthRedirect(undefined), false);
 });
 
-test("DEFAULT_AUTH_REDIRECT_PATTERNS is exported as an array of regexes", () => {
+await test("DEFAULT_AUTH_REDIRECT_PATTERNS is exported as an array of regexes", () => {
   assert.ok(Array.isArray(DEFAULT_AUTH_REDIRECT_PATTERNS));
   assert.ok(DEFAULT_AUTH_REDIRECT_PATTERNS.length >= 5);
   for (const re of DEFAULT_AUTH_REDIRECT_PATTERNS) {
@@ -57,21 +63,21 @@ test("DEFAULT_AUTH_REDIRECT_PATTERNS is exported as an array of regexes", () => 
   }
 });
 
-test("restoreAuthSession returns no_credentials_configured when project has no creds", async () => {
+await test("restoreAuthSession returns no_credentials_configured when project has no creds", async () => {
   const fakePage = { url: () => "https://example.com/login" };
   const result = await restoreAuthSession(fakePage, { url: "https://example.com" });
   assert.equal(result.ok, false);
   assert.equal(result.reason, "no_credentials_configured");
 });
 
-test("restoreAuthSession returns no_project_url when project has no url", async () => {
+await test("restoreAuthSession returns no_project_url when project has no url", async () => {
   const fakePage = { url: () => "https://example.com/login" };
   const result = await restoreAuthSession(fakePage, { credentials: encryptCredentials({ username: "u", password: "p" }) });
   assert.equal(result.ok, false);
   assert.equal(result.reason, "no_project_url");
 });
 
-test("restoreAuthSession returns credentials_decryption_failed on corrupt blob", async () => {
+await test("restoreAuthSession returns credentials_decryption_failed on corrupt blob", async () => {
   const fakePage = { url: () => "https://example.com/login" };
   // _encrypted marker present but ciphertext is garbage — decrypt throws,
   // decryptCredentials catches and returns null.
@@ -91,18 +97,18 @@ test("restoreAuthSession returns credentials_decryption_failed on corrupt blob",
   assert.equal(result.reason, "credentials_decryption_failed");
 });
 
-test("NON_EXECUTED_SKIP_REASONS includes auth_expired", () => {
+await test("NON_EXECUTED_SKIP_REASONS includes auth_expired", () => {
   assert.ok(NON_EXECUTED_SKIP_REASONS.has("auth_expired"));
 });
 
-test("isNonExecutedSkip recognises auth_expired skips", () => {
+await test("isNonExecutedSkip recognises auth_expired skips", () => {
   assert.equal(isNonExecutedSkip({ status: "skipped", skipReason: "auth_expired" }), true);
   assert.equal(isNonExecutedSkip({ status: "failed", skipReason: "auth_expired" }), false);
   assert.equal(isNonExecutedSkip({ status: "skipped", skipReason: "over_budget" }), true);
   assert.equal(isNonExecutedSkip({ status: "skipped" }), false);
 });
 
-test("classifyFailure maps auth_session_expired_unrecoverable to AUTH_EXPIRED", () => {
+await test("classifyFailure maps auth_session_expired_unrecoverable to AUTH_EXPIRED", () => {
   assert.equal(
     classifyFailure("auth_session_expired_unrecoverable: relogin_failed: bad credentials"),
     "AUTH_EXPIRED",
@@ -117,11 +123,50 @@ test("classifyFailure maps auth_session_expired_unrecoverable to AUTH_EXPIRED", 
   );
 });
 
-test("classifyFailure does NOT misclassify generic selector errors as AUTH_EXPIRED", () => {
+await test("classifyFailure does NOT misclassify generic selector errors as AUTH_EXPIRED", () => {
   assert.equal(
     classifyFailure("locator('button:has-text(\"Sign in\")') not found"),
     "SELECTOR_ISSUE",
   );
 });
 
-test.summary();
+// B4 / RLY-004 — `sessionRefreshIntervalMs` ticker contract pin. We don't
+// boot a Playwright browser here (that's covered by the existing
+// browser-level fixtures); we pin the activation gate so a regression in
+// the type-coercion path can't silently disable every operator's
+// configured ping. The runner's gate is:
+//   Number.isInteger(v) && v >= 60_000 && project.url
+// Anything else → no ticker. Mirrors the [60_000, 86_400_000] route
+// validator at `backend/src/routes/projects.js`.
+await test("session-refresh ticker activation gate accepts valid integers ≥ 60_000", () => {
+  const shouldStartTicker = (project) =>
+    Number.isInteger(project?.sessionRefreshIntervalMs)
+    && project.sessionRefreshIntervalMs >= 60_000
+    && !!project.url;
+  assert.equal(shouldStartTicker({ url: "https://example.com", sessionRefreshIntervalMs: 60_000 }), true);
+  assert.equal(shouldStartTicker({ url: "https://example.com", sessionRefreshIntervalMs: 900_000 }), true);
+  assert.equal(shouldStartTicker({ url: "https://example.com", sessionRefreshIntervalMs: 86_400_000 }), true);
+});
+
+await test("session-refresh ticker activation gate rejects null / 0 / sub-minute / non-integer / no-url projects", () => {
+  const shouldStartTicker = (project) =>
+    Number.isInteger(project?.sessionRefreshIntervalMs)
+    && project.sessionRefreshIntervalMs >= 60_000
+    && !!project.url;
+  assert.equal(shouldStartTicker({ url: "https://example.com", sessionRefreshIntervalMs: null }), false);
+  assert.equal(shouldStartTicker({ url: "https://example.com", sessionRefreshIntervalMs: 0 }), false);
+  assert.equal(shouldStartTicker({ url: "https://example.com", sessionRefreshIntervalMs: 59_999 }), false);
+  assert.equal(shouldStartTicker({ url: "https://example.com", sessionRefreshIntervalMs: 1.5 }), false);
+  assert.equal(shouldStartTicker({ url: "https://example.com", sessionRefreshIntervalMs: "900000" }), false);
+  // Project with no URL — ticker has nothing to navigate to.
+  assert.equal(shouldStartTicker({ url: "", sessionRefreshIntervalMs: 60_000 }), false);
+  assert.equal(shouldStartTicker({ sessionRefreshIntervalMs: 60_000 }), false);
+});
+
+  summary("b4-auth-recovery");
+}
+
+main().catch((err) => {
+  console.error("b4-auth-recovery test runner crashed:", err);
+  process.exit(1);
+});
