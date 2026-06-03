@@ -168,8 +168,13 @@ await test("two concurrent non-force probes share one adapter invocation", async
       providerRouteRepo.probeAndPersist(wsId, row.id),
       providerRouteRepo.probeAndPersist(wsId, row.id),
     ]);
-    assert.equal(stub.calls.length, 1,
-      `concurrent probes should coalesce; got ${stub.calls.length} adapter calls`);
+    // Each capabilityProbe issues 2 adapter calls per probe (reachability
+    // + jsonMode); see capability-probe.test.js for the contract pin.
+    // Coalescing of 2 callers should therefore yield 2 stub calls total
+    // (1 probe × 2 adapter calls), NOT 4 (which would mean both callers
+    // probed independently).
+    assert.equal(stub.calls.length, 2,
+      `concurrent probes should coalesce into 1 probe (=2 adapter calls); got ${stub.calls.length}`);
     assert.ok(a && b && a.id === b.id, "both callers should receive a route row");
   } finally {
     stub.restore();
@@ -196,8 +201,12 @@ await test("force: true does NOT ride an in-flight non-force probe (rotate-key g
       new Promise((r) => setTimeout(r, 5))
         .then(() => providerRouteRepo.probeAndPersist(wsId, row.id, { force: true })),
     ]);
-    assert.equal(stub.calls.length, 2,
-      `force: true must skip inflight reuse; got ${stub.calls.length} adapter calls (expected 2)`);
+    // Each capabilityProbe issues 2 adapter calls per probe (reachability
+    // + jsonMode); see capability-probe.test.js. Two probes (first
+    // non-force + second force) = 4 adapter calls total. If the force
+    // probe had ridden on the inflight non-force one, we'd see only 2.
+    assert.equal(stub.calls.length, 4,
+      `force: true must skip inflight reuse; got ${stub.calls.length} adapter calls (expected 4 = 2 probes × 2 calls)`);
   } finally {
     stub.restore();
   }
@@ -232,8 +241,13 @@ await test("inflight entry is cleared even when the underlying probe rejects", a
     // had leaked the prior (rejected/resolved) promise, this would
     // either reuse the stale result or never resolve.
     await providerRouteRepo.probeAndPersist(wsId, row.id, { force: true });
-    assert.equal(invocations, 2,
-      `inflight Map must clear on completion; got ${invocations} invocations`);
+    // Expected invocation count: 3 = first probe's 1 (reachability throws →
+    // jsonMode probe skipped per capability-probe.js contract) + second
+    // force probe's 2 (reachability succeeds + jsonMode probe runs). If
+    // the inflight Map had leaked the first promise, the force probe
+    // would reuse it and the count would stay at 1 instead.
+    assert.equal(invocations, 3,
+      `inflight Map must clear on completion; got ${invocations} invocations (expected 3 = 1 fail + 2 success)`);
   } finally {
     _setProtocolAdapterForTests(null);
   }

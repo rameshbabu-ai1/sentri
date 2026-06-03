@@ -275,7 +275,10 @@ await test("timeout: probe aborts at timeoutMs, persists reachable=false", async
     const caps = await runCapabilityProbe(makeRoute(), { timeoutMs: 50 });
     assert.equal(caps.reachable, false);
     assert.ok(caps.errorReason);
-    assert.match(caps.errorReason, /timeout|abort/i);
+    // Product code emits `probe_deadline_exceeded` for timeout aborts —
+    // accept either the legacy `timeout|abort` wording (in case the probe
+    // module's classifier reverts) OR the canonical deadline marker.
+    assert.match(caps.errorReason, /timeout|abort|deadline/i);
   } finally {
     stub.restore();
   }
