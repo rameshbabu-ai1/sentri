@@ -279,7 +279,7 @@ router.patch("/:id", requireRole("qa_lead"), async (req, res) => {
   // injection still falls through to the full `validateProjectPayload` +
   // field-whitelist path below.
   const bodyKeys = req.body && typeof req.body === "object" ? Object.keys(req.body) : [];
-  const SINGLE_FIELD_BYPASS = new Set(["autoApproveThreshold", "iterationCap", "strictPiiFirewall", "piiAllowlist", "visionHealing", "visionHealMaxCallsPerDay", "visionHealMaxCostUsdPerMonth", "coverageEnabled", "sourcemapBaseUrl", "serverCoverageEndpoint", "coverageRegressionThresholdPct", "iframeStrategy", "iframeAllowlist", "hydrationType", "hydrationSelector", "elementTimeoutOverride", "reviewRejectionAlertThreshold"]);
+  const SINGLE_FIELD_BYPASS = new Set(["autoApproveThreshold", "iterationCap", "strictPiiFirewall", "piiAllowlist", "visionHealing", "visionHealMaxCallsPerDay", "visionHealMaxCostUsdPerMonth", "coverageEnabled", "sourcemapBaseUrl", "serverCoverageEndpoint", "coverageRegressionThresholdPct", "iframeStrategy", "iframeAllowlist", "hydrationType", "hydrationSelector", "elementTimeoutOverride", "reviewRejectionAlertThreshold", "sessionRefreshIntervalMs"]);
   const isSingleFieldPatch = bodyKeys.length > 0 && bodyKeys.every((k) => SINGLE_FIELD_BYPASS.has(k));
   if (!isSingleFieldPatch) {
     const validationErr = validateProjectPayload(req.body);
@@ -556,6 +556,26 @@ router.patch("/:id", requireRole("qa_lead"), async (req, res) => {
     }
   }
 
+  // AUDIT-ROADMAP B4 / RLY-004 — proactive session keep-alive interval.
+  // `null` opts out (column default — no ping ever fires). When set, the
+  // testRunner spins a setInterval per active page to navigate to
+  // `project.url` every N ms. Bounds:
+  //   • lower 60_000 ms (1 min) — anything tighter is noisy and trips
+  //     rate limiters on the target app.
+  //   • upper 86_400_000 ms (24 h) — beyond this the value is functionally
+  //     equivalent to "never" and is almost certainly a typo (e.g. user
+  //     pasted seconds where they meant ms).
+  if (Object.hasOwn(req.body, "sessionRefreshIntervalMs")) {
+    const v = req.body.sessionRefreshIntervalMs;
+    if (v === null || v === 0) {
+      fields.sessionRefreshIntervalMs = null;
+    } else if (!Number.isInteger(v) || v < 60_000 || v > 86_400_000) {
+      return res.status(400).json({ error: "sessionRefreshIntervalMs must be null, 0 (disable), or an integer between 60000 (1 min) and 86400000 (24 h)." });
+    } else {
+      fields.sessionRefreshIntervalMs = v;
+    }
+  }
+
   // AUDIT-ROADMAP B2 — per-project override for the adaptive element
   // timeout. `null` re-enables the runner's `2 * p95LoadMs` adaptive
   // calculation. Bounded to [500, 300000] (0.5 s – 5 min): the lower bound
@@ -595,12 +615,34 @@ router.patch("/:id", requireRole("qa_lead"), async (req, res) => {
     // saved selectors.
     const incoming = req.body.credentials;
     const existingDecrypted = decryptCredentials(existing.credentials) || {};
+    // B4 / SCL-001 — `totpSecret` merge follows the same blank-equals-keep
+    // policy as `password`. The client never receives the seed (the
+    // sanitiser surfaces only `_hasTotp: true`), so editing a project to
+    // rotate the username must NOT wipe a previously-configured seed.
+    // Explicit `null` clears it (separate "clear TOTP" UX path). Same
+    // base32 normalisation as the test-totp preview endpoint —
+    // tolerate spaces / lowercase from authenticator-app QR exports.
+    let mergedTotp = existingDecrypted.totpSecret || "";
+    if (Object.hasOwn(incoming, "totpSecret")) {
+      if (incoming.totpSecret === null || incoming.totpSecret === "") {
+        mergedTotp = "";
+      } else if (typeof incoming.totpSecret === "string") {
+        const normalised = incoming.totpSecret.trim().toUpperCase().replace(/\s+/g, "").replace(/=+$/, "");
+        if (!/^[A-Z2-7]{16,128}$/.test(normalised)) {
+          return res.status(400).json({ error: "credentials.totpSecret must be a base32 string (16–128 chars, A-Z + 2-7) or null." });
+        }
+        mergedTotp = normalised;
+      } else {
+        return res.status(400).json({ error: "credentials.totpSecret must be a string or null." });
+      }
+    }
     const merged = {
       usernameSelector: incoming.usernameSelector ?? existingDecrypted.usernameSelector ?? "",
       passwordSelector: incoming.passwordSelector ?? existingDecrypted.passwordSelector ?? "",
       submitSelector:   incoming.submitSelector   ?? existingDecrypted.submitSelector   ?? "",
       username: incoming.username || existingDecrypted.username || "",
       password: incoming.password || existingDecrypted.password || "",
+      totpSecret: mergedTotp,
     };
     fields.credentials = encryptCredentials(merged);
   }
@@ -614,6 +656,66 @@ router.patch("/:id", requireRole("qa_lead"), async (req, res) => {
 
   const updated = projectRepo.getByIdInWorkspace(req.params.id, req.workspaceId);
   res.json(sanitiseProjectForClient(updated));
+});
+
+/**
+ * POST /api/v1/projects/:id/credentials/test-totp
+ *
+ * B4 (AUDIT-ROADMAP) / SCL-001 — operator-facing preview of the live RFC 6238
+ * TOTP code for the project's stored seed. Admin-only because the seed is a
+ * shared-secret credential; exposing the live code is equivalent to
+ * granting one-shot login as the test user.
+ *
+ * Industry-standard pattern for "verify my MFA seed actually works":
+ * - Auth0 / Okta operator consoles show a "Test connection" preview that
+ *   computes the current code without persisting it.
+ * - 1Password / Bitwarden show the current TOTP code in the UI when the
+ *   user is already authenticated to the vault — same trust boundary.
+ *
+ * The seed itself NEVER leaves the server. The response contains only the
+ * 6-digit code + the seconds remaining in the current 30-second window
+ * so the UI can render a countdown. The code is computed live from the
+ * AES-decrypted seed and immediately discarded; no caching, no logging.
+ *
+ * Returns 404 when the project has no credentials, 400 when credentials
+ * exist but no `totpSecret` is configured (so the UI can show "TOTP not
+ * configured — set a seed first" instead of the generic 500).
+ */
+router.post("/:id/credentials/test-totp", requireRole("admin"), async (req, res) => {
+  const project = projectRepo.getByIdInWorkspace(req.params.id, req.workspaceId);
+  if (!project) return res.status(404).json({ error: "not found" });
+  if (!project.credentials) {
+    return res.status(400).json({ error: "Project has no credentials configured." });
+  }
+  const creds = decryptCredentials(project.credentials);
+  if (!creds || !creds.totpSecret) {
+    return res.status(400).json({ error: "TOTP secret is not configured on this project.", code: "TOTP_NOT_CONFIGURED" });
+  }
+
+  // Lazy import keeps `routes/projects.js` cheap to load — TOTP is only
+  // touched on this admin-gated path and never on the cold-start critical
+  // path of an unauthenticated request.
+  const { generateTotpCode } = await import("../utils/totp.js");
+  let payload;
+  try {
+    payload = generateTotpCode(creds.totpSecret);
+  } catch (err) {
+    return res.status(500).json({ error: `Failed to generate TOTP code: ${err.message || err}` });
+  }
+
+  // Audit log so admins can answer "who previewed the live MFA code for
+  // project X, when?" — the same threat model that drives SEC-007
+  // hash-chain enforcement. The seed itself is never written to the log;
+  // only the fact of the preview.
+  logActivity({ ...actor(req),
+    type: "project.credentials.test_totp",
+    projectId: project.id, projectName: project.name,
+    workspaceId: project.workspaceId,
+    detail: `Previewed live TOTP code for project "${project.name}"`,
+    meta: { codeExpiresInSeconds: payload.expiresInSeconds },
+  });
+
+  return res.json({ code: payload.code, expiresInSeconds: payload.expiresInSeconds });
 });
 
 router.delete("/:id", requireRole("admin"), (req, res) => {

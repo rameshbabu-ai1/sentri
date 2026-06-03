@@ -339,6 +339,15 @@ const files = [
   // server) and the operator runbook at `QA.md § "iframe + SPA hydration
   // + adaptive timeout (AUDIT-ROADMAP B2)"`.
   "tests/b2-adaptive-timeout.test.js",
+  // B4 (AUDIT-ROADMAP Bundle 4) — RLY-004 auth-session recovery +
+  // SCL-001 target-app TOTP. Pure-function contracts: TOTP code +
+  // verify round-trip, base32-decode edge cases, auth-redirect URL
+  // pattern matching, credential encryption round-trip with totpSecret,
+  // and feedback-loop AUTH_EXPIRED classification. Browser-level
+  // restoreAuthSession integration is covered by the existing
+  // `auto-login.test.js` fixtures.
+  "tests/b4-totp.test.js",
+  "tests/b4-auth-recovery.test.js",
   // B2 — E2E iframe enumeration against a real Chromium browser pointed
   // at a local same-origin HTTP fixture (the only way to exercise the
   // browser's same-origin policy: `data:` URLs each have their own

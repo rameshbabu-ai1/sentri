@@ -40,6 +40,13 @@ import { diffScreenshot } from "./visualDiff.js";
 import { applyNetworkCondition } from "./networkConditions.js";
 import { writeArtifactBuffer } from "../utils/objectStorage.js";
 import { snapshotServerCoverage, diffServerCoverage } from "../pipeline/serverCoverageProxy.js"; // AUTO-009h — opt-in server-side coverage capture for API tests.
+// B4 (AUDIT-ROADMAP) / RLY-004 — mid-run auth-session recovery. The check
+// fires after every `page.goto()` AND when the test errors out so we can
+// distinguish "the SUT logged the test out" from "the test code is broken"
+// — see the call sites below for the gating logic. Both helpers are
+// loaded lazily (top-level await is avoided so this file stays
+// require-compatible) — they're pure functions of the page + project.
+import { looksLikeAuthRedirect, restoreAuthSession } from "../pipeline/autoLogin.js";
 
 
 // ─── Non-visual action detection (S3-06) ──────────────────────────────────────
@@ -711,6 +718,39 @@ export async function executeTest(test, browser, runId, stepIndex, runStart, opt
         if (!codeAlreadyNavigates) {
           await page.goto(test.sourceUrl, { waitUntil: "domcontentloaded", timeout: NAVIGATION_TIMEOUT });
           await page.waitForTimeout(800);
+          // B4 / RLY-004 — auth-session-expiry detection. If the SUT
+          // redirected our auth-gated navigation to a login / session-
+          // expired page, the project's stored credentials let us recover
+          // in-place and continue execution. The check is opt-in via
+          // `project.credentials`: no credentials → no recovery attempt
+          // (a test that landed on `/login` deliberately wasn't auth-
+          // gated, so the post-test assertions should run against
+          // whatever the SUT served). The recovery itself is best-effort
+          // — if it fails we surface a structured `_authSessionExpired`
+          // marker on the error so `feedbackLoop.js` classifies the
+          // result as `AUTH_EXPIRED` (skipped from regeneration) rather
+          // than `NAVIGATION_FAIL` (which would burn the
+          // self-healing waterfall + auto-regen path on what is really
+          // an environmental issue).
+          let projectForAuth = null;
+          try { projectForAuth = test.projectId ? projectRepo.getById(test.projectId) : null; }
+          catch { /* repo blip — fall through with no recovery */ }
+          if (projectForAuth?.credentials && looksLikeAuthRedirect(page.url())) {
+            console.warn(formatLogLine("warn", runId,
+              `[executeTest] Auth redirect detected after goto ${test.sourceUrl} → ${page.url()} — attempting session recovery`));
+            const recovery = await restoreAuthSession(page, projectForAuth, { run: { id: runId } });
+            if (!recovery.ok) {
+              const authErr = new Error(
+                `auth_session_expired_unrecoverable: ${recovery.reason || "unknown"}`
+              );
+              authErr.code = "AUTH_SESSION_EXPIRED";
+              authErr.__authSessionExpired = true;
+              throw authErr;
+            }
+            // Brief settle so the SUT's post-login redirect chain
+            // finishes before the test body runs its first action.
+            await page.waitForTimeout(500).catch(() => {});
+          }
         }
 
         const healingScopeId = `${test.id}@v${test.codeVersion || 0}`;
@@ -875,8 +915,40 @@ export async function executeTest(test, browser, runId, stepIndex, runStart, opt
     await Promise.race([testExecution, testTimeoutPromise]);
 
   } catch (err) {
-    result.status = "failed";
-    result.error = formatTestError(err);
+    // B4 / RLY-004 — auth-session-expiry is an ENVIRONMENTAL failure,
+    // not a test regression. Mark the result as `skipped` with reason
+    // `auth_expired` so the gate evaluator excludes it from the pass-
+    // rate denominator (mirrors `over_budget` / `skipped_no_impact`
+    // semantics in `utils/skipReasons.js`). The feedback loop's
+    // `AUTH_EXPIRED` classifier ALSO catches the error-string path
+    // (legacy callers that don't carry the structured marker), but
+    // setting `status: "skipped"` here is the authoritative signal —
+    // it prevents `run.failed++` from incrementing and ensures the
+    // RunDetail UI renders the test with the `auth_expired` chip
+    // rather than the generic red "Failed" badge.
+    // B4 / RLY-004 — auth-session-expiry is an ENVIRONMENTAL failure,
+    // not a test regression. Mark the result as `skipped` with reason
+    // `auth_expired` so the gate evaluator excludes it from the pass-
+    // rate denominator (mirrors `over_budget` / `skipped_no_impact`
+    // semantics in `utils/skipReasons.js`). The feedback loop's
+    // `AUTH_EXPIRED` classifier ALSO catches the error-string path
+    // (legacy callers that don't carry the structured marker), but
+    // setting `status: "skipped"` here is the authoritative signal —
+    // it prevents `run.failed++` from incrementing and ensures the
+    // RunDetail UI renders the test with the `auth_expired` chip.
+    // We do NOT early-return — the outer `finally` MUST run for
+    // resource cleanup (screencast, context, video, downloads dir);
+    // we just skip the vision-healing waterfall + healing-events
+    // persistence below since there's no real failed locator to heal.
+    const isAuthExpiry = err.code === "AUTH_SESSION_EXPIRED" || err.__authSessionExpired === true;
+    if (isAuthExpiry) {
+      result.status = "skipped";
+      result.skipReason = "auth_expired";
+      result.error = formatTestError(err);
+    } else {
+      result.status = "failed";
+      result.error = formatTestError(err);
+    }
 
     // Persist healing events from the failed run
     const healingScopeId = `${test.id}@v${test.codeVersion || 0}`;
@@ -887,13 +959,18 @@ export async function executeTest(test, browser, runId, stepIndex, runStart, opt
     result.stepStatuses = err.__stepStatuses || [];
 
     // Screenshot the failure state — also feeds the vision-healing waterfall below.
+    // B4: skip artifact + vision-heal work entirely on auth-expiry. The
+    // "failure" is environmental and there is no broken locator to heal;
+    // a screenshot of the login page would burn S3 quota for zero value.
     let failureShot = null;
-    try {
-      const shot = await captureScreenshot(page, runId, stepIndex, { failed: true });
-      result.screenshot = shot.base64;
-      result.screenshotPath = shot.artifactPath;
-      failureShot = Buffer.from(shot.base64, "base64");
-    } catch { /* page may be closed */ }
+    if (!isAuthExpiry) {
+      try {
+        const shot = await captureScreenshot(page, runId, stepIndex, { failed: true });
+        result.screenshot = shot.base64;
+        result.screenshotPath = shot.artifactPath;
+        failureShot = Buffer.from(shot.base64, "base64");
+      } catch { /* page may be closed */ }
+    }
 
     // ── MNT-001: host-side vision-healing waterfall (stages 7-8) ───────────
     // Invoked AFTER the runtime helper waterfall (stages 0-6) failed.

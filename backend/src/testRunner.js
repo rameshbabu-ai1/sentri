@@ -897,6 +897,21 @@ export async function runTests(project, tests, run, { parallelWorkers, browser: 
       if (!isShardMode) run.passed++;
       shardPassed++;
       logWarn(run, `WARNING: ${result.error}`);
+    } else if (result.status === "skipped") {
+      // B4 (AUDIT-ROADMAP) / RLY-004 — auth-session-expiry path. The test
+      // never executed against the real application, so it must NOT
+      // increment `run.failed` (which would inflate the failure rate and
+      // trigger maxFailures gate violations on what is environmental
+      // noise). `isNonExecutedSkip` already excludes `auth_expired` from
+      // the pass-rate denominator (`utils/skipReasons.js`); leaving
+      // counters untouched keeps the math consistent with the gate
+      // evaluator. Other in-flight skip reasons (`upstream_failed` from
+      // AUTO-014) flow through `recordSkipResult` which writes directly
+      // to `run.results` and never reaches `processResult` — so this
+      // branch fires only for `executeTest`-emitted skips (today: just
+      // `auth_expired`; future skip kinds emitted at execution time
+      // share the same accounting contract).
+      logWarn(run, `SKIPPED (${result.skipReason || "unknown"}): ${result.error || ""}`);
     } else {
       if (!isShardMode) run.failed++;
       shardFailed++;
