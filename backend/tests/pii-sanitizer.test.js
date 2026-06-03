@@ -284,13 +284,4 @@ test("`total` excludes jwt/bearer/queryAuth (already counted in token)", () => {
   });
 });
 
-// ── Summary ────────────────────────────────────────────────────────────────
-
-realConsoleLog(`\n${"─".repeat(50)}`);
-realConsoleLog(`Results: ${passed} passed, ${failed} failed out of ${passed + failed} tests`);
-if (failed > 0) {
-  realConsoleLog(`\n⚠️  ${failed} test(s) failed`);
-  process.exit(1);
-} else {
-  realConsoleLog(`\n🎉 All pii-sanitizer tests passed!`);
-}
+summary("pii-sanitizer");
