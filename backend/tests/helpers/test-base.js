@@ -390,6 +390,15 @@ export function createTestRunner() {
   let failed = 0;
   let skipped = 0;
   const failedTests = [];
+  // Track every test invocation so `summary()` can wait for in-flight async
+  // tests before reading the counters. Without this, bare top-level
+  // `test(...); test(...); summary();` (the pattern in ~half the suite)
+  // would exit with `0 passed, 0 failed` because `summary()` runs before
+  // any microtask resolves. With this, callers no longer need the
+  // `async function main() { await test(...) ... summary(); }` wrapper —
+  // the wrapper is still supported (a resolved promise is a no-op in
+  // `Promise.all`) but no longer required.
+  const pending = [];
 
   const filter = (process.env.TEST_FILTER || "").toLowerCase();
   const bail = process.env.TEST_BAIL === "1" || process.env.TEST_BAIL === "true";
@@ -406,50 +415,58 @@ export function createTestRunner() {
    *   timeout (ms). Bump for tests that legitimately need longer than the
    *   30 s default (e.g. browser-pool warmups).
    */
-  async function test(name, fn, opts = {}) {
+  function test(name, fn, opts = {}) {
     if (bailed) {
       skipped++;
       console.log(`  ⊝  ${name}  (bailed)`);
-      return;
+      return Promise.resolve();
     }
     if (filter && !name.toLowerCase().includes(filter)) {
       skipped++;
       // Don't spam — only log skips when explicitly verbose to keep the
       // filtered run output focused on what's actually running.
       if (verbose) console.log(`  ⊝  ${name}  (filtered)`);
-      return;
+      return Promise.resolve();
     }
 
     const timeoutMs = Number.isFinite(opts.timeout) ? opts.timeout : DEFAULT_TEST_TIMEOUT_MS;
     const startedAt = Date.now();
-    try {
-      await raceWithTimeout(Promise.resolve().then(fn), timeoutMs, name);
-      const elapsed = Date.now() - startedAt;
-      passed++;
-      const slow = elapsed >= SLOW_TEST_THRESHOLD_MS ? `  ⏱  ${elapsed}ms` : "";
-      console.log(`  ✅  ${name}${slow}`);
-    } catch (err) {
-      const elapsed = Date.now() - startedAt;
-      failed++;
-      failedTests.push({ name, message: err?.message || String(err) });
-      // Use `console.error` so CI stderr capture surfaces failures even
-      // when the consumer is grepping stdout for "FAIL"-style markers.
-      console.error(`  ❌  ${name}  (${elapsed}ms)`);
-      // Full stack — the single most common debugging complaint with the
-      // previous runner was "I can't tell which file/line threw".
-      const stack = err?.stack || `      ${err?.message || err}`;
-      console.error(indent(stack, "      "));
-      // Walk `err.cause` chain in verbose mode — Node's AggregateError +
-      // fetch failures often hide the real cause one level down.
-      if (verbose && err?.cause) {
-        console.error(`      Caused by:`);
-        console.error(indent(err.cause.stack || String(err.cause), "        "));
-      }
-      if (bail) {
-        bailed = true;
-        console.error(`\n  ⛔ Bailing on first failure (TEST_BAIL=1)`);
-      }
-    }
+    // Build the per-test promise eagerly and register it in `pending` so
+    // `summary()` can await it without the caller needing to `await test()`.
+    // Returned to the caller too — preserves the `await test(...)` pattern
+    // for files that DO want sequential ordering (e.g. tests that mutate
+    // shared DB state between cases).
+    const promise = raceWithTimeout(Promise.resolve().then(fn), timeoutMs, name)
+      .then(() => {
+        const elapsed = Date.now() - startedAt;
+        passed++;
+        const slow = elapsed >= SLOW_TEST_THRESHOLD_MS ? `  ⏱  ${elapsed}ms` : "";
+        console.log(`  ✅  ${name}${slow}`);
+      })
+      .catch((err) => {
+        const elapsed = Date.now() - startedAt;
+        failed++;
+        failedTests.push({ name, message: err?.message || String(err) });
+        // Use `console.error` so CI stderr capture surfaces failures even
+        // when the consumer is grepping stdout for "FAIL"-style markers.
+        console.error(`  ❌  ${name}  (${elapsed}ms)`);
+        // Full stack — the single most common debugging complaint with the
+        // previous runner was "I can't tell which file/line threw".
+        const stack = err?.stack || `      ${err?.message || err}`;
+        console.error(indent(stack, "      "));
+        // Walk `err.cause` chain in verbose mode — Node's AggregateError +
+        // fetch failures often hide the real cause one level down.
+        if (verbose && err?.cause) {
+          console.error(`      Caused by:`);
+          console.error(indent(err.cause.stack || String(err.cause), "        "));
+        }
+        if (bail) {
+          bailed = true;
+          console.error(`\n  ⛔ Bailing on first failure (TEST_BAIL=1)`);
+        }
+      });
+    pending.push(promise);
+    return promise;
   }
 
   /**
@@ -466,7 +483,21 @@ export function createTestRunner() {
    *
    * @param {string} [label] — Optional label for the summary line.
    */
-  function summary(label) {
+  async function summary(label) {
+    // Drain any test() promises the caller didn't await. This is what
+    // lets a file written as `test("a", …); test("b", …); summary();`
+    // (no `await`, no `main()` wrapper) report accurate counts — the
+    // bare-top-level pattern is now safe by construction.
+    //
+    // Iterate-with-pop instead of a single `Promise.all(pending)` so any
+    // late-registered test from a `then()` chain inside a test body is
+    // also drained. New entries added during the await loop back into
+    // the next iteration; the loop exits when no new tests appear.
+    while (pending.length > 0) {
+      const batch = pending.splice(0, pending.length);
+      await Promise.allSettled(batch);
+    }
+
     const tail = skipped > 0 ? `, ${skipped} skipped` : "";
     console.log(`\n  ${passed} passed, ${failed} failed${tail}`);
     if (failed > 0) {
