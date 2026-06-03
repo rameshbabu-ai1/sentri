@@ -320,29 +320,135 @@ export async function registerAndLogin(req, base, { name, email, password }) {
 // ─── Mini test runner ─────────────────────────────────────────────────────────
 
 /**
- * Create a mini test runner with pass/fail counting.
+ * Default per-test timeout (ms). A hung test (e.g. an unawaited `fetch` against
+ * a dead listen socket, a `waitFor` against a selector that never appears)
+ * would otherwise block the whole suite until the CI job-level timeout fires
+ * — at which point we lose the per-test name and stack. 30 000 ms is a
+ * deliberately generous ceiling: real unit tests finish in <100 ms; integration
+ * tests that genuinely need longer should bump the per-call `timeout` option.
+ */
+const DEFAULT_TEST_TIMEOUT_MS = 30_000;
+
+/**
+ * Tests slower than this threshold (ms) get a `⏱  Nms` marker appended to
+ * their pass line. Surfaces creeping slowness before it becomes a CI tax.
+ * Matches the `node:test --test-reporter=spec` slow-test highlight (>75 ms
+ * default; we use 500 ms because this suite mixes unit + integration files).
+ */
+const SLOW_TEST_THRESHOLD_MS = 500;
+
+/**
+ * Race a promise against a timeout. Resolves with the promise's value on
+ * settle, rejects with a structured `Error` on timeout. Keeps the original
+ * test name in the error message so the failure line is self-describing
+ * even when grepped out of CI logs.
  *
- * @returns {{ test: Function, summary: Function, passed: number, failed: number }}
+ * @param {Promise<any>} promise
+ * @param {number} ms
+ * @param {string} testName
+ * @returns {Promise<any>}
+ */
+function raceWithTimeout(promise, ms, testName) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`Test "${testName}" exceeded ${ms} ms timeout`));
+      }, ms);
+      // Allow the process to exit if the test promise resolves first — the
+      // timer would otherwise keep the event loop alive past `summary()`.
+      timer.unref?.();
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Create a mini test runner with pass/fail counting and standard debug
+ * ergonomics (stack traces, per-test timing, slow-test markers, default
+ * timeout, name-filter + bail env knobs).
+ *
+ * ### Debug knobs (env vars)
+ * - `TEST_FILTER=<substring>` — only run tests whose name contains the
+ *   substring (case-insensitive). Skipped tests are reported as `⊝  skipped`
+ *   so the filter doesn't silently hide them.
+ * - `TEST_BAIL=1` — stop the file on the first failure. Useful when
+ *   iterating on a single broken case without scrolling past unrelated
+ *   noise.
+ * - `TEST_VERBOSE=1` — print full stack on failure even when the error has
+ *   a `cause` chain (default already prints `err.stack`; this is the
+ *   escape hatch for nested causes).
+ *
+ * ### Per-call overrides
+ * `test(name, fn, { timeout })` lets a single slow test bump the default
+ * without changing the runner-wide ceiling.
+ *
+ * @returns {{ test: Function, summary: Function, passed: number, failed: number, skipped: number }}
  */
 export function createTestRunner() {
   let passed = 0;
   let failed = 0;
+  let skipped = 0;
+  const failedTests = [];
+
+  const filter = (process.env.TEST_FILTER || "").toLowerCase();
+  const bail = process.env.TEST_BAIL === "1" || process.env.TEST_BAIL === "true";
+  const verbose = process.env.TEST_VERBOSE === "1" || process.env.TEST_VERBOSE === "true";
+  let bailed = false;
 
   /**
    * Run a named test function and track pass/fail.
    *
    * @param {string}   name — Test description.
    * @param {Function} fn — Async test function (should throw on failure).
+   * @param {Object}   [opts]
+   * @param {number}   [opts.timeout=DEFAULT_TEST_TIMEOUT_MS] — Per-test
+   *   timeout (ms). Bump for tests that legitimately need longer than the
+   *   30 s default (e.g. browser-pool warmups).
    */
-  async function test(name, fn) {
+  async function test(name, fn, opts = {}) {
+    if (bailed) {
+      skipped++;
+      console.log(`  ⊝  ${name}  (bailed)`);
+      return;
+    }
+    if (filter && !name.toLowerCase().includes(filter)) {
+      skipped++;
+      // Don't spam — only log skips when explicitly verbose to keep the
+      // filtered run output focused on what's actually running.
+      if (verbose) console.log(`  ⊝  ${name}  (filtered)`);
+      return;
+    }
+
+    const timeoutMs = Number.isFinite(opts.timeout) ? opts.timeout : DEFAULT_TEST_TIMEOUT_MS;
+    const startedAt = Date.now();
     try {
-      await fn();
+      await raceWithTimeout(Promise.resolve().then(fn), timeoutMs, name);
+      const elapsed = Date.now() - startedAt;
       passed++;
-      console.log(`  ✅  ${name}`);
+      const slow = elapsed >= SLOW_TEST_THRESHOLD_MS ? `  ⏱  ${elapsed}ms` : "";
+      console.log(`  ✅  ${name}${slow}`);
     } catch (err) {
+      const elapsed = Date.now() - startedAt;
       failed++;
-      console.log(`  ❌  ${name}`);
-      console.log(`      ${err.message}`);
+      failedTests.push({ name, message: err?.message || String(err) });
+      // Use `console.error` so CI stderr capture surfaces failures even
+      // when the consumer is grepping stdout for "FAIL"-style markers.
+      console.error(`  ❌  ${name}  (${elapsed}ms)`);
+      // Full stack — the single most common debugging complaint with the
+      // previous runner was "I can't tell which file/line threw".
+      const stack = err?.stack || `      ${err?.message || err}`;
+      console.error(indent(stack, "      "));
+      // Walk `err.cause` chain in verbose mode — Node's AggregateError +
+      // fetch failures often hide the real cause one level down.
+      if (verbose && err?.cause) {
+        console.error(`      Caused by:`);
+        console.error(indent(err.cause.stack || String(err.cause), "        "));
+      }
+      if (bail) {
+        bailed = true;
+        console.error(`\n  ⛔ Bailing on first failure (TEST_BAIL=1)`);
+      }
     }
   }
 
@@ -361,8 +467,19 @@ export function createTestRunner() {
    * @param {string} [label] — Optional label for the summary line.
    */
   function summary(label) {
-    console.log(`\n  ${passed} passed, ${failed} failed`);
-    if (failed > 0) process.exit(1);
+    const tail = skipped > 0 ? `, ${skipped} skipped` : "";
+    console.log(`\n  ${passed} passed, ${failed} failed${tail}`);
+    if (failed > 0) {
+      // Recap of failed test names so a long file's failures are visible
+      // without scrolling back through the per-test output. Mirrors what
+      // `node:test --test-reporter=spec` prints at the end of a run.
+      console.error(`\n  Failed tests:`);
+      for (const f of failedTests) {
+        console.error(`    ❌  ${f.name}`);
+        console.error(`        ${f.message}`);
+      }
+      process.exit(1);
+    }
     if (label) console.log(`\n🎉 All ${label} tests passed!`);
     process.exit(0);
   }
@@ -372,7 +489,23 @@ export function createTestRunner() {
     summary,
     get passed() { return passed; },
     get failed() { return failed; },
+    get skipped() { return skipped; },
   };
+}
+
+/**
+ * Indent every line of a multi-line string with the given prefix. Used to
+ * align stack traces under the `❌  <name>` line.
+ *
+ * @param {string} text
+ * @param {string} prefix
+ * @returns {string}
+ */
+function indent(text, prefix) {
+  return String(text)
+    .split("\n")
+    .map((line) => `${prefix}${line}`)
+    .join("\n");
 }
 
 // ─── Convenience: full test context ───────────────────────────────────────────
