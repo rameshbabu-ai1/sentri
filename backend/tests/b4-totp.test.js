@@ -133,6 +133,24 @@ await test("encryptCredentials omits totpSecret cleanly when not provided", () =
   assert.equal(dec.totpSecret || "", "");
 });
 
+// Bug-fix regression pin: extending `encryptCredentials` to round-trip
+// extreme / boundary base32 inputs the route-layer validator (`/^[A-Z2-7]{16,128}$/`)
+// is the gatekeeper for. The encryption layer itself is format-agnostic
+// — it would happily store `"not-base32"` as ciphertext — so the only
+// way to guarantee `dec.totpSecret` round-trips a valid seed is to
+// pin the boundary lengths against the AES envelope.
+await test("encryptCredentials round-trips minimum-length (16-char) base32 seed", () => {
+  const seed = "ABCDEFGHIJKLMNOP"; // 16 chars — the minimum the route accepts
+  const enc = encryptCredentials({ username: "u", password: "p", totpSecret: seed });
+  assert.equal(decryptCredentials(enc).totpSecret, seed);
+});
+
+await test("encryptCredentials round-trips maximum-length (128-char) base32 seed", () => {
+  const seed = "A".repeat(128); // 128 chars — the ceiling the route accepts
+  const enc = encryptCredentials({ username: "u", password: "p", totpSecret: seed });
+  assert.equal(decryptCredentials(enc).totpSecret, seed);
+});
+
 await test("decryptCredentials handles legacy rows (no _encrypted) without throwing", () => {
   // Pre-B4 rows have `totpSecret` absent entirely. The decryption path
   // must NOT throw and must surface an empty totpSecret.

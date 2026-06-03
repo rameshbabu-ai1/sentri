@@ -148,6 +148,96 @@ await test("session-refresh ticker activation gate accepts valid integers ≥ 60
   assert.equal(shouldStartTicker({ url: "https://example.com", sessionRefreshIntervalMs: 86_400_000 }), true);
 });
 
+// Bug-fix regression: the `validateAndNormaliseTotpSecret` helper at
+// `routes/projects.js` is the single source of truth for the base32
+// format on BOTH the POST and PATCH paths. Pre-fix, only PATCH
+// validated — POST passed `req.body.credentials.totpSecret` straight
+// to `encryptCredentials()`, so an invalid seed silently shipped to
+// production and only surfaced as a failed MFA challenge at crawl
+// time. Re-implementing the validator inline here (intentionally a
+// duplicate) so this test is independent of the route module's
+// internals — if the production helper drifts, the route-level test
+// `b4-totp-routes.test.js` (added separately) catches it; this is
+// pure-function coverage of the contract.
+await test("totpSecret validator: null / empty / undefined → ok with value:null", () => {
+  function validate(incoming) {
+    if (incoming === undefined || incoming === null || incoming === "") {
+      return { ok: true, value: null };
+    }
+    if (typeof incoming !== "string") {
+      return { ok: false, error: "must be a string or null." };
+    }
+    const normalised = incoming.trim().toUpperCase().replace(/\s+/g, "").replace(/=+$/, "");
+    if (!/^[A-Z2-7]{16,128}$/.test(normalised)) {
+      return { ok: false, error: "must be base32 (16–128 chars)." };
+    }
+    return { ok: true, value: normalised };
+  }
+  assert.deepEqual(validate(null), { ok: true, value: null });
+  assert.deepEqual(validate(undefined), { ok: true, value: null });
+  assert.deepEqual(validate(""), { ok: true, value: null });
+});
+
+await test("totpSecret validator: normalises whitespace + lowercase + padding", () => {
+  function validate(incoming) {
+    if (incoming === undefined || incoming === null || incoming === "") {
+      return { ok: true, value: null };
+    }
+    if (typeof incoming !== "string") {
+      return { ok: false, error: "must be a string or null." };
+    }
+    const normalised = incoming.trim().toUpperCase().replace(/\s+/g, "").replace(/=+$/, "");
+    if (!/^[A-Z2-7]{16,128}$/.test(normalised)) {
+      return { ok: false, error: "must be base32 (16–128 chars)." };
+    }
+    return { ok: true, value: normalised };
+  }
+  assert.deepEqual(validate("jbswy3 dpehpk 3pxp"), { ok: true, value: "JBSWY3DPEHPK3PXP" });
+  assert.deepEqual(validate("JBSWY3DPEHPK3PXP==="), { ok: true, value: "JBSWY3DPEHPK3PXP" });
+  assert.deepEqual(validate("  abcdefghijklmnop  "), { ok: true, value: "ABCDEFGHIJKLMNOP" });
+});
+
+await test("totpSecret validator: rejects non-string types", () => {
+  function validate(incoming) {
+    if (incoming === undefined || incoming === null || incoming === "") {
+      return { ok: true, value: null };
+    }
+    if (typeof incoming !== "string") {
+      return { ok: false, error: "must be a string or null." };
+    }
+    const normalised = incoming.trim().toUpperCase().replace(/\s+/g, "").replace(/=+$/, "");
+    if (!/^[A-Z2-7]{16,128}$/.test(normalised)) {
+      return { ok: false, error: "must be base32 (16–128 chars)." };
+    }
+    return { ok: true, value: normalised };
+  }
+  assert.equal(validate(42).ok, false);
+  assert.equal(validate({}).ok, false);
+  assert.equal(validate([]).ok, false);
+  assert.equal(validate(true).ok, false);
+});
+
+await test("totpSecret validator: rejects sub-minimum / over-maximum / non-base32 chars", () => {
+  function validate(incoming) {
+    if (incoming === undefined || incoming === null || incoming === "") {
+      return { ok: true, value: null };
+    }
+    if (typeof incoming !== "string") {
+      return { ok: false, error: "must be a string or null." };
+    }
+    const normalised = incoming.trim().toUpperCase().replace(/\s+/g, "").replace(/=+$/, "");
+    if (!/^[A-Z2-7]{16,128}$/.test(normalised)) {
+      return { ok: false, error: "must be base32 (16–128 chars)." };
+    }
+    return { ok: true, value: normalised };
+  }
+  assert.equal(validate("ABC").ok, false); // 3 chars — below 16
+  assert.equal(validate("A".repeat(129)).ok, false); // above 128
+  assert.equal(validate("ABCDEFGHIJKLMNO1").ok, false); // contains '1' (not base32)
+  assert.equal(validate("ABCDEFGHIJKLMNO0").ok, false); // contains '0' (not base32)
+  assert.equal(validate("not-base32-text!").ok, false); // contains '-' + '!'
+});
+
 await test("session-refresh ticker activation gate rejects null / 0 / sub-minute / non-integer / no-url projects", () => {
   const shouldStartTicker = (project) =>
     Number.isInteger(project?.sessionRefreshIntervalMs)

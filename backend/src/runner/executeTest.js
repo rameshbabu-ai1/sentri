@@ -762,17 +762,42 @@ export async function executeTest(test, browser, runId, stepIndex, runStart, opt
               && projectForAuth.sessionRefreshIntervalMs >= 60_000
               && projectForAuth.url) {
             const intervalMs = projectForAuth.sessionRefreshIntervalMs;
+            // BUG-FIX (lifeguard): the previous design pinged the SAME
+            // page the test was driving. Even with the `inFlight` latch,
+            // the goto could race a mid-action wait — destroying the
+            // DOM the test expected and surfacing as a confusing
+            // `SELECTOR_ISSUE` / `NAVIGATION_FAIL`. Fix: open a SECOND
+            // page in the SAME BrowserContext. The cookie jar is shared
+            // (same context = same `Cookie` header on every request), so
+            // a navigation on the refresh page keeps the test's session
+            // alive WITHOUT touching the test page's DOM. Industry
+            // pattern: this is what Auth0 / Okta SDKs do under the hood
+            // for "session ping" (Playwright `BrowserContext` is
+            // explicitly designed for multi-tab session sharing).
             sessionRefreshTicker = setInterval(() => {
-              // Don't ping while a real navigation is in flight — the
-              // contract is "keep the cookie alive between actions",
-              // not "race the test's own goto". The test body's actions
-              // already exercise the cookie; we only need the ping when
-              // the page would otherwise sit idle.
-              if (page.isClosed?.() || sessionRefreshInFlight) return;
+              // Per-tick re-entrance guard. If the previous tick is
+              // still navigating (slow target, 30s timeout), skip this
+              // one rather than queueing — operators set this for
+              // long-running runs, not tight polling.
+              if (sessionRefreshInFlight) return;
+              if (context.pages?.()?.length === 0) return; // context closing
               sessionRefreshInFlight = true;
               Promise.resolve()
-                .then(() => page.goto(projectForAuth.url, { waitUntil: "domcontentloaded", timeout: 30_000 }))
-                .catch(() => { /* best-effort — see JSDoc above */ })
+                .then(async () => {
+                  // Open + close a fresh page per tick so we never hold
+                  // a long-lived background tab (which would show up as
+                  // a popup in `context.pages()` and confuse the
+                  // popup-cleanup loop in `finally` below). Cost: ~50ms
+                  // per ping for the page create/close round-trip;
+                  // negligible against the minimum 60s interval.
+                  const refreshPage = await context.newPage();
+                  try {
+                    await refreshPage.goto(projectForAuth.url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+                  } finally {
+                    await refreshPage.close().catch(() => {});
+                  }
+                })
+                .catch(() => { /* best-effort — never fails the test */ })
                 .finally(() => { sessionRefreshInFlight = false; });
             }, intervalMs);
             // Stop the ticker from keeping the worker alive past the

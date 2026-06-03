@@ -269,11 +269,21 @@ async function fillTotpField(page, totpSecret, { timeout = 5000, logger } = {}) 
     }
 
     // OTP field gone → success. Still visible → rejected; retry once.
+    //
+    // Use `waitFor({ state: "hidden" })` (NOT `isVisible({ timeout })`):
+    // Playwright's `isVisible()` ignores its `timeout` option when the
+    // element is currently visible and returns `true` synchronously, so
+    // the post-submit OTP field — which is by definition still on screen
+    // at the instant we check — would always return `true` and force a
+    // retry on the happy path. `waitFor({ state: "hidden" })` honours the
+    // timeout and resolves when the field disappears (auto-submit /
+    // navigation away / DOM swap). On timeout it throws, which we treat
+    // as "still on screen" → loop into the retry branch below.
     try {
-      const stillVisible = await otpField.first().isVisible({ timeout: 1500 }).catch(() => false);
-      if (!stillVisible) return { attempted: true, ok: true };
-    } catch {
+      await otpField.first().waitFor({ state: "hidden", timeout: 1500 });
       return { attempted: true, ok: true };
+    } catch {
+      // Still visible after the wait — fall through to the retry branch.
     }
 
     if (attempt === 0) {

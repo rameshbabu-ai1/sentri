@@ -106,6 +106,40 @@ function validateQualityGates(payload) {
 }
 
 
+/**
+ * B4 (AUDIT-ROADMAP) / SCL-001 — validate + normalise the optional
+ * `credentials.totpSecret` field on POST + PATCH. Lifeguard BUG-0002:
+ * the POST path was passing raw `req.body.credentials` to
+ * `encryptCredentials()` without any base32 check, so a typo
+ * (`"not-base32"`) stored garbage that produced wrong codes at crawl
+ * time with no diagnostic. This helper is the single source of truth
+ * for the seed format — same `[A-Z2-7]{16,128}` ceiling on both
+ * create and update paths.
+ *
+ * Tolerates the same authenticator-app exports the PATCH path always
+ * has: whitespace, lowercase, trailing `=` padding.
+ *
+ * @param   {*} incoming - Raw `req.body.credentials.totpSecret` value.
+ * @returns {Object} `{ ok, value, error }`:
+ *   - `ok: true, value: null` → field was absent or explicitly cleared.
+ *   - `ok: true, value: <normalised base32>` → seed accepted.
+ *   - `ok: false, error: <message>` → caller should respond 400 with `error`.
+ * @private
+ */
+function validateAndNormaliseTotpSecret(incoming) {
+  if (incoming === undefined || incoming === null || incoming === "") {
+    return { ok: true, value: null };
+  }
+  if (typeof incoming !== "string") {
+    return { ok: false, error: "credentials.totpSecret must be a string or null." };
+  }
+  const normalised = incoming.trim().toUpperCase().replace(/\s+/g, "").replace(/=+$/, "");
+  if (!/^[A-Z2-7]{16,128}$/.test(normalised)) {
+    return { ok: false, error: "credentials.totpSecret must be a base32 string (16–128 chars, A-Z + 2-7) or null." };
+  }
+  return { ok: true, value: normalised };
+}
+
 function validateWebVitalsBudgets(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "webVitalsBudgets must be an object";
   const out = {};
@@ -223,6 +257,25 @@ router.post("/", requireRole("qa_lead"), (req, res) => {
   const name = sanitise(req.body.name, 200);
   const url = req.body.url?.trim() || "";
   const credentials = req.body.credentials;
+
+  // B4 / SCL-001 — Lifeguard BUG-0002: the POST path previously passed
+  // `req.body.credentials` straight to `encryptCredentials()` with no
+  // base32 validation, so an operator who typed an invalid TOTP seed at
+  // project creation got a silent garbage-in/garbage-out failure at
+  // crawl time (the seed encrypted fine, then produced wrong codes
+  // against the target app's MFA challenge with no diagnostic). The
+  // PATCH path always validated; this brings POST to parity using the
+  // same helper.
+  if (credentials && typeof credentials === "object") {
+    const totp = validateAndNormaliseTotpSecret(credentials.totpSecret);
+    if (!totp.ok) return res.status(400).json({ error: totp.error });
+    // Mutate the incoming credentials object so the normalised seed
+    // (whitespace stripped, uppercased, padding removed) flows through
+    // to `encryptCredentials()` below — matches the PATCH path's
+    // single-normalisation contract.
+    if (totp.value !== null) credentials.totpSecret = totp.value;
+    else if (Object.hasOwn(credentials, "totpSecret")) delete credentials.totpSecret;
+  }
 
   const id = generateProjectId();
   const project = {
@@ -619,22 +672,17 @@ router.patch("/:id", requireRole("qa_lead"), async (req, res) => {
     // policy as `password`. The client never receives the seed (the
     // sanitiser surfaces only `_hasTotp: true`), so editing a project to
     // rotate the username must NOT wipe a previously-configured seed.
-    // Explicit `null` clears it (separate "clear TOTP" UX path). Same
-    // base32 normalisation as the test-totp preview endpoint —
-    // tolerate spaces / lowercase from authenticator-app QR exports.
+    // Explicit `null` clears it (separate "clear TOTP" UX path). Shared
+    // validator with the POST path (single source of truth for the
+    // base32 format — see `validateAndNormaliseTotpSecret` above).
     let mergedTotp = existingDecrypted.totpSecret || "";
     if (Object.hasOwn(incoming, "totpSecret")) {
-      if (incoming.totpSecret === null || incoming.totpSecret === "") {
-        mergedTotp = "";
-      } else if (typeof incoming.totpSecret === "string") {
-        const normalised = incoming.totpSecret.trim().toUpperCase().replace(/\s+/g, "").replace(/=+$/, "");
-        if (!/^[A-Z2-7]{16,128}$/.test(normalised)) {
-          return res.status(400).json({ error: "credentials.totpSecret must be a base32 string (16–128 chars, A-Z + 2-7) or null." });
-        }
-        mergedTotp = normalised;
-      } else {
-        return res.status(400).json({ error: "credentials.totpSecret must be a string or null." });
-      }
+      const totp = validateAndNormaliseTotpSecret(incoming.totpSecret);
+      if (!totp.ok) return res.status(400).json({ error: totp.error });
+      // `value: null` means "explicitly cleared" on PATCH (incoming was
+      // `null` / `""`); replace the merged value with empty so the
+      // re-encrypt below stores `""`. Non-null is the normalised seed.
+      mergedTotp = totp.value === null ? "" : totp.value;
     }
     const merged = {
       usernameSelector: incoming.usernameSelector ?? existingDecrypted.usernameSelector ?? "",
