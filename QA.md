@@ -970,6 +970,11 @@ _(automated: see `tests/e2e/specs/ui-smoke.spec.mjs` for login negative path + v
 **Negative / edge:**
 
 - TOTP secret too short (< 16 chars) → PATCH returns **400** `credentials.totpSecret must be a base32 string (16–128 chars, A-Z + 2-7) or null.`
+- TOTP seed length policy (industry-standard, consumer-side):
+  - **16–25 chars (80–125 bits)** → accepted but flagged. The `project.create` / `project.update` audit row carries `meta.weakTotpSeed = { length, reason: "below_rfc4226_minimum" }`. SIEM / SOC dashboards can flag tenants with sub-RFC 4226 seeds without blocking automation. Matches the 1Password / Authy / `oathtool` consumer behaviour — Sentri can't unilaterally force the SUT to re-issue, so rejecting these seeds would make MFA automation impossible against many legacy SUTs.
+  - **26–31 chars (≥ 128 bits)** → accepted silently. Clears RFC 4226 §4 R6 MUST.
+  - **32 chars (160 bits)** → accepted silently. Matches RFC 6238 §5.1 RECOMMENDED and what Sentri's own SEC-004 MFA flow generates.
+  - **128 chars** → upper bound. Larger pastes are almost always full QR-code URIs (`otpauth://...`) rather than the seed itself.
 - TOTP secret with lowercase / spaces / padding (`jbswy3 dpehpk 3pxp===`) → normalised server-side to uppercase, whitespace + padding stripped. PATCH succeeds.
 - TOTP secret containing non-base32 chars (`0`, `1`, `8`, `9`) → PATCH returns **400**.
 - Pre-B4 project rows (no `totpSecret` in the encrypted blob) → still round-trip through `decryptCredentials` cleanly; `_hasTotp: false`; no TOTP field auto-fill at crawl time.

@@ -818,7 +818,25 @@ export async function executeTest(test, browser, runId, stepIndex, runStart, opt
           // /login from a deliberate non-auth-gated assertion → does
           // NOT trigger restoreAuthSession because the matching URL is
           // the project's intended sourceUrl."
-          if (projectForAuth?.credentials && looksLikeAuthRedirect(page.url()) && page.url() !== test.sourceUrl) {
+          //
+          // Follow-up hardening: compare URL **pathnames**, not the
+          // full string. SUTs commonly append `?next=`/`?returnTo=`
+          // query params on a session-expired bounce — strict equality
+          // would miss that (sourceUrl=`/login` vs landed
+          // `/login?next=/dashboard`) and incorrectly fire recovery on
+          // a test that deliberately targets the login page. Pathname
+          // comparison ignores query/hash while still distinguishing
+          // `/login` from `/dashboard`. Fallback to the raw string
+          // when URL parsing throws (relative sourceUrl, malformed) so
+          // we never break the check on edge cases.
+          const samePathAsSource = (() => {
+            try {
+              return new URL(page.url()).pathname === new URL(test.sourceUrl).pathname;
+            } catch {
+              return page.url() === test.sourceUrl;
+            }
+          })();
+          if (projectForAuth?.credentials && looksLikeAuthRedirect(page.url()) && !samePathAsSource) {
             console.warn(formatLogLine("warn", runId,
               `[executeTest] Auth redirect detected after goto ${test.sourceUrl} → ${page.url()} — attempting session recovery`));
             const recovery = await restoreAuthSession(page, projectForAuth, { run: { id: runId } });

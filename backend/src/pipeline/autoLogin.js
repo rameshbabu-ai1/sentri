@@ -377,7 +377,9 @@ export function looksLikeAuthRedirect(url) {
  *     `project.url` if back-navigation also failed).
  *   - `ok: false` → recovery aborted. `reason` is one of
  *     `no_credentials_configured`, `no_project_url`,
- *     `credentials_decryption_failed`, `recovery_navigation_failed: …`,
+ *     `credentials_decryption_failed` (AES round-trip failed — key
+ *     rotated or blob corrupt), `credentials_blank` (decrypt OK but
+ *     username + password both empty), `recovery_navigation_failed: …`,
  *     or `relogin_failed: …`. Caller surfaces as `auth_expired` skip.
  */
 export async function restoreAuthSession(page, project, opts = {}) {
@@ -395,9 +397,25 @@ export async function restoreAuthSession(page, project, opts = {}) {
     return { ok: false, reason: "no_project_url" };
   }
 
+  // Split the legacy `credentials_decryption_failed` envelope into two
+  // distinct reasons so operators get an actionable diagnostic:
+  //   - `credentials_decryption_failed` — `decryptCredentials` returned
+  //     `null` (key rotation without re-encrypt, corrupt AES blob).
+  //     Fix path: re-encrypt the project's credentials with the current
+  //     `CREDENTIAL_SECRET`.
+  //   - `credentials_blank` — decrypt succeeded but both username and
+  //     password are empty strings. Fix path: set the credentials on
+  //     the project (they were never configured, or were cleared).
+  // Pre-split, both surfaced as `credentials_decryption_failed`, sending
+  // operators chasing a decryption issue when the real cause was empty
+  // fields. Both reasons remain in the `NON_EXECUTED_SKIP_REASONS` /
+  // `AUTH_EXPIRED` classifier paths so accounting is unchanged.
   const creds = decryptCredentials(project.credentials);
-  if (!creds || (!creds.username && !creds.password)) {
+  if (!creds) {
     return { ok: false, reason: "credentials_decryption_failed" };
+  }
+  if (!creds.username && !creds.password) {
+    return { ok: false, reason: "credentials_blank" };
   }
 
   let originatingUrl = "";

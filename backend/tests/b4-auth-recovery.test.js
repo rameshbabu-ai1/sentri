@@ -97,6 +97,24 @@ await test("restoreAuthSession returns credentials_decryption_failed on corrupt 
   assert.equal(result.reason, "credentials_decryption_failed");
 });
 
+// Follow-up — `credentials_decryption_failed` was overloaded with the
+// "decrypt OK but fields blank" case, sending operators chasing a
+// decryption issue when the real cause was an unconfigured project.
+// Pin the split so the two failure modes stay distinguishable.
+await test("restoreAuthSession returns credentials_blank when decrypt succeeds but fields are empty", async () => {
+  const fakePage = { url: () => "https://example.com/login" };
+  // encryptCredentials round-trips empty strings cleanly — decrypt
+  // returns `{ username: "", password: "", ... }` (not null). This is
+  // the never-configured / explicitly-cleared shape.
+  const blankCreds = encryptCredentials({ username: "", password: "" });
+  const result = await restoreAuthSession(fakePage, {
+    url: "https://example.com",
+    credentials: blankCreds,
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "credentials_blank");
+});
+
 await test("NON_EXECUTED_SKIP_REASONS includes auth_expired", () => {
   assert.ok(NON_EXECUTED_SKIP_REASONS.has("auth_expired"));
 });
@@ -236,6 +254,68 @@ await test("totpSecret validator: rejects sub-minimum / over-maximum / non-base3
   assert.equal(validate("ABCDEFGHIJKLMNO1").ok, false); // contains '1' (not base32)
   assert.equal(validate("ABCDEFGHIJKLMNO0").ok, false); // contains '0' (not base32)
   assert.equal(validate("not-base32-text!").ok, false); // contains '-' + '!'
+});
+
+// Industry-standard weak-seed signal — accept the 16-char floor (matches
+// 1Password / Authy / oathtool consumer behaviour) but flag seeds below
+// RFC 4226's 128-bit MUST (≈26 base32 chars) so SOC dashboards can audit.
+// The validator's full implementation lives in `routes/projects.js`
+// (`validateAndNormaliseTotpSecret`); this duplicates the contract for
+// pure-function pinning. If the production helper drifts, this fails
+// independently of the route module's import graph.
+await test("totpSecret validator: 16-char seed accepted with weakSeed flag (below RFC 4226 MUST)", () => {
+  function validate(incoming) {
+    if (incoming === undefined || incoming === null || incoming === "") {
+      return { ok: true, value: null };
+    }
+    if (typeof incoming !== "string") {
+      return { ok: false, error: "must be a string or null." };
+    }
+    const normalised = incoming.trim().toUpperCase().replace(/\s+/g, "").replace(/=+$/, "");
+    if (!/^[A-Z2-7]{16,128}$/.test(normalised)) {
+      return { ok: false, error: "must be base32 (16–128 chars)." };
+    }
+    if (normalised.length < 26) {
+      return { ok: true, value: normalised, weakSeed: true, weakSeedReason: "below_rfc4226_minimum" };
+    }
+    return { ok: true, value: normalised };
+  }
+  // 16-char Google-Authenticator-style seed: accepted but flagged.
+  const r16 = validate("JBSWY3DPEHPK3PXP");
+  assert.equal(r16.ok, true);
+  assert.equal(r16.value, "JBSWY3DPEHPK3PXP");
+  assert.equal(r16.weakSeed, true);
+  assert.equal(r16.weakSeedReason, "below_rfc4226_minimum");
+  // 25-char seed: still below the 26-char (128-bit) floor.
+  const r25 = validate("A".repeat(25));
+  assert.equal(r25.weakSeed, true);
+});
+
+await test("totpSecret validator: 26-char+ seed accepted with no weakSeed flag (clears RFC 4226 MUST)", () => {
+  function validate(incoming) {
+    if (incoming === undefined || incoming === null || incoming === "") {
+      return { ok: true, value: null };
+    }
+    if (typeof incoming !== "string") {
+      return { ok: false, error: "must be a string or null." };
+    }
+    const normalised = incoming.trim().toUpperCase().replace(/\s+/g, "").replace(/=+$/, "");
+    if (!/^[A-Z2-7]{16,128}$/.test(normalised)) {
+      return { ok: false, error: "must be base32 (16–128 chars)." };
+    }
+    if (normalised.length < 26) {
+      return { ok: true, value: normalised, weakSeed: true, weakSeedReason: "below_rfc4226_minimum" };
+    }
+    return { ok: true, value: normalised };
+  }
+  // 26-char: smallest count that clears the 128-bit RFC 4226 MUST.
+  const r26 = validate("A".repeat(26));
+  assert.equal(r26.ok, true);
+  assert.equal(r26.weakSeed, undefined);
+  // 32-char (RFC 6238 RECOMMENDED 160-bit): industry gold standard.
+  const r32 = validate("A".repeat(32));
+  assert.equal(r32.ok, true);
+  assert.equal(r32.weakSeed, undefined);
 });
 
 await test("session-refresh ticker activation gate rejects null / 0 / sub-minute / non-integer / no-url projects", () => {

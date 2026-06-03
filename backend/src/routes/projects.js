@@ -108,21 +108,47 @@ function validateQualityGates(payload) {
 
 /**
  * B4 (AUDIT-ROADMAP) / SCL-001 — validate + normalise the optional
- * `credentials.totpSecret` field on POST + PATCH. Lifeguard BUG-0002:
- * the POST path was passing raw `req.body.credentials` to
- * `encryptCredentials()` without any base32 check, so a typo
- * (`"not-base32"`) stored garbage that produced wrong codes at crawl
- * time with no diagnostic. This helper is the single source of truth
- * for the seed format — same `[A-Z2-7]{16,128}` ceiling on both
- * create and update paths.
+ * `credentials.totpSecret` field on POST + PATCH. Single source of truth
+ * for the seed format on both create and update paths.
  *
- * Tolerates the same authenticator-app exports the PATCH path always
- * has: whitespace, lowercase, trailing `=` padding.
+ * ### Industry-standard seed length policy (consumer side)
+ *
+ * Sentri is an **automation consumer** of third-party MFA seeds — the
+ * seed comes from the target app's enrollment, not from Sentri. Three
+ * specs define the floors:
+ *
+ * | Spec                      | Bits | Base32 chars | Status      |
+ * |---------------------------|------|--------------|-------------|
+ * | RFC 4226 §4 R6 (HOTP)     | 128  | ~26          | **MUST**    |
+ * | RFC 6238 §5.1 (TOTP)      | 160  | 32           | RECOMMENDED |
+ * | NIST SP 800-63B AAL2      | 112  | ~22          | MUST        |
+ *
+ * The 80-bit / 16-char floor here matches what password managers
+ * (1Password, Bitwarden, Authy) and automation tools (`otplib`,
+ * `speakeasy`, `oathtool`) accept in practice — they're consumers like
+ * us. Issuers (Auth0, Okta, Sentri's own SEC-004 MFA flow) generate the
+ * RFC 6238 recommended 160-bit secret because they own the strength
+ * choice. Consumers can't unilaterally force the SUT to re-issue, so
+ * rejecting a 16-char seed would mean "platform literally cannot
+ * automate MFA against this SUT" with no operator workaround.
+ *
+ * Operators who care about per-tenant compliance get a structured
+ * warning + audit signal in the response envelope when the seed is
+ * below RFC 4226's 128-bit MUST (`weakSeed: true`,
+ * `weakSeedReason: "below_rfc4226_minimum"`). The PATCH/POST handlers
+ * forward this through `logActivity()` so SOC dashboards can flag
+ * sub-spec seeds without blocking the platform from working.
+ *
+ * Tolerates the same authenticator-app exports operators paste in:
+ * whitespace, lowercase, trailing `=` padding.
  *
  * @param   {*} incoming - Raw `req.body.credentials.totpSecret` value.
- * @returns {Object} `{ ok, value, error }`:
+ * @returns {Object} `{ ok, value, error, weakSeed?, weakSeedReason? }`:
  *   - `ok: true, value: null` → field was absent or explicitly cleared.
- *   - `ok: true, value: <normalised base32>` → seed accepted.
+ *   - `ok: true, value: <normalised base32>` → seed accepted. When the
+ *     seed is below 26 chars (128-bit RFC 4226 MUST), the result also
+ *     carries `weakSeed: true, weakSeedReason: "below_rfc4226_minimum"`
+ *     so the caller can audit-log the acceptance.
  *   - `ok: false, error: <message>` → caller should respond 400 with `error`.
  * @private
  */
@@ -136,6 +162,20 @@ function validateAndNormaliseTotpSecret(incoming) {
   const normalised = incoming.trim().toUpperCase().replace(/\s+/g, "").replace(/=+$/, "");
   if (!/^[A-Z2-7]{16,128}$/.test(normalised)) {
     return { ok: false, error: "credentials.totpSecret must be a base32 string (16–128 chars, A-Z + 2-7) or null." };
+  }
+  // Industry-standard "weak seed" signal — accept but flag. 26 base32
+  // chars ≈ 130 bits, the smallest count that clears RFC 4226's 128-bit
+  // MUST. Below that, the seed is functionally valid (TOTP codes still
+  // verify) but provides less brute-force resistance than the spec
+  // requires of the issuer. Surfaced upstream as an audit-log meta
+  // field, NOT as a 400 — operators can't force the SUT to re-issue.
+  if (normalised.length < 26) {
+    return {
+      ok: true,
+      value: normalised,
+      weakSeed: true,
+      weakSeedReason: "below_rfc4226_minimum",
+    };
   }
   return { ok: true, value: normalised };
 }
@@ -266,6 +306,7 @@ router.post("/", requireRole("qa_lead"), (req, res) => {
   // against the target app's MFA challenge with no diagnostic). The
   // PATCH path always validated; this brings POST to parity using the
   // same helper.
+  let weakTotpSeedSignal = null;
   if (credentials && typeof credentials === "object") {
     const totp = validateAndNormaliseTotpSecret(credentials.totpSecret);
     if (!totp.ok) return res.status(400).json({ error: totp.error });
@@ -275,6 +316,13 @@ router.post("/", requireRole("qa_lead"), (req, res) => {
     // single-normalisation contract.
     if (totp.value !== null) credentials.totpSecret = totp.value;
     else if (Object.hasOwn(credentials, "totpSecret")) delete credentials.totpSecret;
+    // Industry-standard weak-seed surfacing. The 80-bit floor is the
+    // pragmatic consumer ceiling (what 1Password / Authy / oathtool
+    // accept), but sub-128-bit seeds violate RFC 4226's MUST and SOC
+    // dashboards want a signal. Capture for the audit row below.
+    if (totp.weakSeed) {
+      weakTotpSeedSignal = { length: totp.value.length, reason: totp.weakSeedReason };
+    }
   }
 
   const id = generateProjectId();
@@ -292,6 +340,12 @@ router.post("/", requireRole("qa_lead"), (req, res) => {
   logActivity({ ...actor(req),
     type: "project.create", projectId: id, projectName: name,
     detail: `Project created — "${name}" (${url})`,
+    // SEC compliance: surface sub-RFC 4226 TOTP seeds at the create
+    // step so audit consumers (SIEM / SOC dashboards) can flag tenants
+    // operating with weak MFA secrets. `meta` is only set when the
+    // signal is non-null, so projects without TOTP keep their existing
+    // audit-row shape bit-for-bit identical.
+    ...(weakTotpSeedSignal ? { meta: { weakTotpSeed: weakTotpSeedSignal } } : {}),
   });
 
   res.status(201).json(sanitiseProjectForClient(project));
@@ -676,6 +730,7 @@ router.patch("/:id", requireRole("qa_lead"), async (req, res) => {
     // validator with the POST path (single source of truth for the
     // base32 format — see `validateAndNormaliseTotpSecret` above).
     let mergedTotp = existingDecrypted.totpSecret || "";
+    let patchWeakTotpSeedSignal = null;
     if (Object.hasOwn(incoming, "totpSecret")) {
       const totp = validateAndNormaliseTotpSecret(incoming.totpSecret);
       if (!totp.ok) return res.status(400).json({ error: totp.error });
@@ -683,6 +738,11 @@ router.patch("/:id", requireRole("qa_lead"), async (req, res) => {
       // `null` / `""`); replace the merged value with empty so the
       // re-encrypt below stores `""`. Non-null is the normalised seed.
       mergedTotp = totp.value === null ? "" : totp.value;
+      // Audit-log signal for sub-RFC 4226 seeds on rotation. See the
+      // POST path's `weakTotpSeedSignal` comment for the policy.
+      if (totp.weakSeed) {
+        patchWeakTotpSeedSignal = { length: totp.value.length, reason: totp.weakSeedReason };
+      }
     }
     const merged = {
       usernameSelector: incoming.usernameSelector ?? existingDecrypted.usernameSelector ?? "",
@@ -700,6 +760,13 @@ router.patch("/:id", requireRole("qa_lead"), async (req, res) => {
   logActivity({ ...actor(req),
     type: "project.update", projectId: req.params.id, projectName: name,
     detail: `Project updated — "${name}" (${url})`,
+    // See POST handler for rationale. `patchWeakTotpSeedSignal` is only
+    // truthy when the incoming PATCH rotated the TOTP seed AND the new
+    // seed is below RFC 4226's 128-bit MUST — single-field PATCHes
+    // that don't touch credentials don't allocate the variable.
+    ...(typeof patchWeakTotpSeedSignal !== "undefined" && patchWeakTotpSeedSignal
+      ? { meta: { weakTotpSeed: patchWeakTotpSeedSignal } }
+      : {}),
   });
 
   const updated = projectRepo.getByIdInWorkspace(req.params.id, req.workspaceId);
