@@ -207,11 +207,15 @@ export async function performAutoLogin(page, { username, password, totpSecret } 
  * @param {object} [opts]
  * @param {number} [opts.timeout=5000]
  * @param {Function} [opts.logger]
- * @returns {Promise<{attempted: boolean, ok: boolean, reason?: string}>}
- *   `attempted: false` → no OTP field detected (NOT an error — app may
- *   not have MFA for this account). `attempted: true, ok: false` →
- *   field found but retry exhausted; caller fails the run with
- *   `auth_session_expired_unrecoverable`.
+ * @returns {Promise<Object>} `{ attempted, ok, reason }`:
+ *   - `attempted: false, ok: true` → no OTP field detected within the
+ *     discovery timeout (NOT an error — the SUT may not have MFA for
+ *     this account, or the user already trusted this device).
+ *   - `attempted: true, ok: true` → OTP field found and submitted; the
+ *     field disappeared after submit (success).
+ *   - `attempted: true, ok: false` → field found but retry exhausted;
+ *     caller fails the run with `auth_session_expired_unrecoverable`.
+ *     `reason` carries the human-readable diagnostic.
  * @private
  */
 async function fillTotpField(page, totpSecret, { timeout = 5000, logger } = {}) {
@@ -350,7 +354,15 @@ export function looksLikeAuthRedirect(url) {
  * @param {object} [opts]
  * @param {object} [opts.run]  - Run object for structured logging context.
  * @param {Function} [opts.logger]
- * @returns {Promise<{ok: boolean, reason?: string, restoredFromUrl?: string, returnedToUrl?: string}>}
+ * @returns {Promise<Object>} `{ ok, reason, restoredFromUrl, returnedToUrl }`:
+ *   - `ok: true` → re-login succeeded. `restoredFromUrl` is the URL the
+ *     test was on before the redirect; `returnedToUrl` is where the page
+ *     ended up (either the original URL on a clean recover, or
+ *     `project.url` if back-navigation also failed).
+ *   - `ok: false` → recovery aborted. `reason` is one of
+ *     `no_credentials_configured`, `no_project_url`,
+ *     `credentials_decryption_failed`, `recovery_navigation_failed: …`,
+ *     or `relogin_failed: …`. Caller surfaces as `auth_expired` skip.
  */
 export async function restoreAuthSession(page, project, opts = {}) {
   const { run, logger } = opts;
