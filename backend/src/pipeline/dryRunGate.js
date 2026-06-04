@@ -27,6 +27,14 @@ import { browserPool } from "../runner/browserPool.js";
 import { throwIfAborted } from "../utils/abortHelper.js";
 import { formatLogLine } from "../utils/logFormatter.js";
 import { getSelfHealingHelperCode } from "../selfHealing.js";
+// AUDIT-ROADMAP B6 — reuse the real runner's code-preprocessing transforms
+// so the dry-run sandbox sees the SAME shape `codeExecutor.js` executes.
+// Generated tests carry `import { test, expect } from '@playwright/test'`
+// + a `test('…', async ({ page }) => { … })` wrapper; a static `import`
+// is a SyntaxError inside the async IIFE (vm runs in script mode, not
+// module mode), so we must extract the bare body + strip imports before
+// wrapping. Mirrors `codeExecutor.js`'s extract → strip → patch chain.
+import { extractTestBody, stripPlaywrightImports, patchNetworkIdle } from "../runner/codeParsing.js";
 
 /**
  * Threshold below which a passing dry-run is flagged as `trivial`.
@@ -113,8 +121,29 @@ export async function dryRunTest(test, project, opts = {}) {
     // exercise the SUT?". Spec: `docs/roadmap/AUDIT-ROADMAP.md:739-741`.
     networkRequests = 0;
 
+    // Preprocess exactly like `codeExecutor.js` before vm compilation:
+    //   1. extractTestBody — pull the inner statements out of the
+    //      `test('…', async ({ page }) => { … })` wrapper so the static
+    //      `import` line + the `test(…)` call (neither legal inside an
+    //      async IIFE in vm script mode) never reach the compiler.
+    //   2. stripPlaywrightImports — defence-in-depth for the
+    //      no-wrapper fallback path (bare-script tests with a top-level
+    //      `import`/`require` and no `test()` call).
+    //   3. patchNetworkIdle — rewrite `networkidle` waits to
+    //      `domcontentloaded` so the dry-run doesn't hang 30 s on SPAs
+    //      that never go idle (same rationale as the real runner).
+    // When `extractTestBody` returns null (raw script, novel codegen),
+    // fall back to the import-stripped full code so the test still runs
+    // rather than failing the gate on a parse error we could have avoided.
+    const extractedBody = extractTestBody(test.playwrightCode);
+    const preparedCode = patchNetworkIdle(
+      extractedBody !== null
+        ? extractedBody
+        : stripPlaywrightImports(test.playwrightCode),
+    );
+
     const helperCode = getSelfHealingHelperCode();
-    const wrapped = `(async () => {\n${helperCode}\n${test.playwrightCode}\n})()`;
+    const wrapped = `(async () => {\n${helperCode}\n${preparedCode}\n})()`;
 
     // Minimal Playwright surface — `expect` is the only thing
     // generated tests reach for that isn't on the `page` object.
