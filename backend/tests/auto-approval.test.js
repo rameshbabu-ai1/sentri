@@ -58,9 +58,10 @@ function makeTest(confidenceScore) {
 // Each pattern-2 case below creates its own project rows via `makeProject`
 // (unique ids via `projectCounter`), so the blocks stay mutually
 // independent — exactly as they were under the pattern-4 `main()`.
-t.resetDb();
+async function main() {
+  ctx.resetDb();
 
-test("threshold null → test lands in draft with no provenance", async () => {
+  await runner.test("threshold null → test lands in draft with no provenance", async () => {
   const run = makeRun();
   const project = makeProject({ autoApproveThreshold: null });
   // AUDIT-ROADMAP B6 — `persistGeneratedTests` is async (opt-in dry-run
@@ -74,7 +75,7 @@ test("threshold null → test lands in draft with no provenance", async () => {
   assert.equal(saved.approvalSource, null);
 });
 
-test("confidence below threshold → draft", async () => {
+  await runner.test("confidence below threshold → draft", async () => {
   const run = makeRun();
   const project = makeProject({ autoApproveThreshold: 0.8 });
   const ids = await persistGeneratedTests([makeTest(0.4)], project, run);
@@ -82,7 +83,7 @@ test("confidence below threshold → draft", async () => {
   assert.equal(saved.reviewStatus, "draft");
 });
 
-test("confidence above threshold → auto-approved with provenance", async () => {
+  await runner.test("confidence above threshold → auto-approved with provenance", async () => {
   const run = makeRun();
   const project = makeProject({ autoApproveThreshold: 0.8 });
   const ids = await persistGeneratedTests([makeTest(0.9)], project, run);
@@ -95,7 +96,7 @@ test("confidence above threshold → auto-approved with provenance", async () =>
   assert.ok(activities.some((a) => a.testId === ids[0] && a.userName === "auto-approver"));
 });
 
-test("revoke clears all four provenance columns on an auto-approved test", async () => {
+  await runner.test("revoke clears all four provenance columns on an auto-approved test", async () => {
   // Revoke (AUTO-003b): an auto-approved test returns to draft with all
   // four provenance columns cleared. We mirror the route handler in
   // backend/src/routes/tests.js (POST /tests/:testId/revoke) directly via
@@ -138,7 +139,7 @@ test("revoke clears all four provenance columns on an auto-approved test", async
   assert.ok(revokeActivities.some((a) => a.testId === ids[0]));
 });
 
-test("revoking a human-approved test also clears provenance and returns to draft", async () => {
+  await runner.test("revoking a human-approved test also clears provenance and returns to draft", async () => {
   const run = makeRun();
   const project = makeProject({ autoApproveThreshold: null });
   const ids = await persistGeneratedTests([makeTest(0.5)], project, run);
@@ -157,7 +158,7 @@ test("revoking a human-approved test also clears provenance and returns to draft
   assert.equal(after.approvalSource, null);
 });
 
-test("rejecting an auto-approved test clears provenance (no audit-trail lie)", async () => {
+  await runner.test("rejecting an auto-approved test clears provenance (no audit-trail lie)", async () => {
   // Rejecting an auto-approved test clears provenance so the rejected row
   // doesn't keep stale `approvalSource: "auto"` / `approvedBy: "auto-approver"`
   // on subsequent reads — a rejected test that still looks auto-approved is
@@ -195,7 +196,7 @@ test("rejecting an auto-approved test clears provenance (no audit-trail lie)", a
   // by mutating `process.env` between cases. Restore the original value
   // at the end so subsequent test files in the same `node` process aren't
   // poisoned with a leftover kill-switch state.
-  test("DISABLE_AUTO_APPROVAL kill-switch forces draft on every truthy value", async () => {
+  await runner.test("DISABLE_AUTO_APPROVAL kill-switch forces draft on every truthy value", async () => {
     const original = process.env.DISABLE_AUTO_APPROVAL;
     try {
       // Sanity check: with the kill-switch unset, a high-confidence test
@@ -251,7 +252,7 @@ test("rejecting an auto-approved test clears provenance (no audit-trail lie)", a
     }
   });
 
-  await summary("auto-approval");
+  runner.summary("auto-approval");
 }
 
 // AGENTS.md §"Use `createTestContext().createTestRunner()`" — surface any
