@@ -134,7 +134,8 @@ function resolveToken(token, fakerInstance, seed) {
  * @param {Iterable<string>} [opts.skipTokens] — tokens NOT to substitute
  *   (e.g. columns already covered by an upstream `testFixtureRepo` row;
  *   spec at `docs/roadmap/AUDIT-ROADMAP.md:786-788`).
- * @returns {Promise<{ substitute: (code: string) => string, seed: number, locale: string, fakerLoaded: boolean }>}
+ * @returns {Promise<Object>} `{ substitute(code), seed, locale, fakerLoaded }` —
+ *   `substitute` is `(code: string) => string`.
  */
 export async function createFaker({ runId, testId, locale = "en", skipTokens } = {}) {
   const seed = seedForTest(runId, testId);

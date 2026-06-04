@@ -294,8 +294,14 @@ export async function applySemanticReview(testIds, project, run, opts = {}) {
     if (!test) continue;
     try {
       throwIfAborted(opts.signal);
-      const { user } = buildSemanticReviewPrompt(test);
-      const text = await generateText(user, {
+      // Pass the full `{ system, user }` envelope — `generateText`
+      // forwards `system` as a separate high-priority message so the
+      // QA-engineer persona + assertion-quality rules from
+      // `buildSystemPrompt()` reach the reviewer. Passing only `user`
+      // would silently drop the persona, degrading the four-question
+      // semantic verdict that is the core of QAL-005.
+      const prompt = buildSemanticReviewPrompt(test);
+      const text = await generateText(prompt, {
         signal: opts.signal,
         agentRole: "reviewer",
         workspaceId: project.workspaceId || null,

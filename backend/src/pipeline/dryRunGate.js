@@ -59,7 +59,7 @@ const ERROR_MAX_CHARS = 2_000;
  * @param {AbortSignal} [opts.signal]
  * @param {object} [opts.poolOverride] — DI hook for tests.
  * @param {number} [opts.timeoutMs]
- * @returns {Promise<{ status: 'passed'|'failed'|'trivial', error?: string, durationMs: number }>}
+ * @returns {Promise<Object>} `{ status: 'passed'|'failed'|'trivial', error, durationMs }`.
  */
 export async function dryRunTest(test, project, opts = {}) {
   const signal = opts.signal;
@@ -175,7 +175,7 @@ export async function dryRunTest(test, project, opts = {}) {
  * @param {Object} project
  * @param {Object} [opts]
  * @param {AbortSignal} [opts.signal]
- * @returns {Promise<Array<{ status: string, error?: string, durationMs: number }>>}
+ * @returns {Promise<Object[]>} One `{ status, error, durationMs }` per test, aligned by index.
  */
 export async function dryRunBatch(tests, project, opts = {}) {
   if (!Array.isArray(tests) || tests.length === 0) return [];

@@ -581,11 +581,19 @@ async function applyB6PreExecutionTransforms(test, runId, opts = {}) {
       const newBody = hasTeardown
         ? `${setupPrefix}try {\n${originalBody}\n} finally {\n${teardownSuffix}\n}`
         : `${setupPrefix}${originalBody}`;
-      // Replace the FIRST occurrence of the original body — defensive
-      // against pathological codegen that embeds the body string
-      // literally inside another string (vanishingly rare; the runtime
-      // helper's vm sandbox would parse-fail on that anyway).
-      next.playwrightCode = next.playwrightCode.replace(originalBody, newBody);
+      // Splice via indexOf + slice (NOT String.prototype.replace) — the
+      // replacement string `newBody` embeds `originalBody`, which is
+      // LLM-generated Playwright code that can contain `$&` / `$'` /
+      // `` $` `` sequences (common in `str.replace(/pat/, "$&-suffix")`
+      // regex-replacement expressions). `replace()` would expand those
+      // `$`-patterns in the replacement, silently producing broken test
+      // code. Position-based slicing is literal — no `$` interpretation.
+      const bodyIdx = next.playwrightCode.indexOf(originalBody);
+      if (bodyIdx !== -1) {
+        next.playwrightCode = next.playwrightCode.slice(0, bodyIdx)
+          + newBody
+          + next.playwrightCode.slice(bodyIdx + originalBody.length);
+      }
     }
   }
 
