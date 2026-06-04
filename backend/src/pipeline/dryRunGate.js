@@ -103,6 +103,16 @@ export async function dryRunTest(test, project, opts = {}) {
       }
     }
 
+    // Reset the request counter AFTER the gate's own initial navigation.
+    // The `page.goto(project.url)` above fires the document request (plus
+    // every sub-resource) which would otherwise pin `networkRequests` ≥ 1
+    // before the test code runs — making the `networkRequests === 0`
+    // trivial-detection check below impossible to satisfy on any project
+    // with a URL configured (i.e. virtually all of them). Only requests
+    // triggered by the test BODY should count toward "did this test
+    // exercise the SUT?". Spec: `docs/roadmap/AUDIT-ROADMAP.md:739-741`.
+    networkRequests = 0;
+
     const helperCode = getSelfHealingHelperCode();
     const wrapped = `(async () => {\n${helperCode}\n${test.playwrightCode}\n})()`;
 

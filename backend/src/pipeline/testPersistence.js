@@ -319,6 +319,19 @@ export async function applySemanticReview(testIds, project, run, opts = {}) {
       if (verdict.verdict === "reject") {
         fields.reviewStatus = "rejected";
         fields.reviewedAt = new Date().toISOString();
+        // Clear the four AUTO-003b provenance columns. A test can be
+        // auto-approved by `persistGeneratedTests` (dry-run gate off /
+        // passed + above threshold) and THEN rejected here when the
+        // semantic pass runs post-persist. Leaving `approvalSource:'auto'`
+        // / `approvedBy:'auto-approver'` on a `rejected` row is the exact
+        // "confusing audit-trail lie" the suite flags at
+        // `backend/tests/auto-approval.test.js:147-152`; every other
+        // rejection path (routes/tests.js, revoke) clears all four
+        // alongside the status flip.
+        fields.approvalSource = null;
+        fields.approvalThreshold = null;
+        fields.approvedAt = null;
+        fields.approvedBy = null;
         rejected += 1;
       }
       testRepo.update(id, fields);
