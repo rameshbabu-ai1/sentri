@@ -512,7 +512,7 @@ function formatTestError(err) {
  * @param {string} [opts.testDataLocale]
  * @returns {Promise<Object>}
  */
-async function applyB6PreExecutionTransforms(test, runId, opts = {}) {
+export async function applyB6PreExecutionTransforms(test, runId, opts = {}) {
   if (!test || typeof test.playwrightCode !== "string") return test;
   const hasSetup    = typeof test.setupCode === "string" && test.setupCode.trim().length > 0;
   const hasTeardown = typeof test.teardownCode === "string" && test.teardownCode.trim().length > 0;

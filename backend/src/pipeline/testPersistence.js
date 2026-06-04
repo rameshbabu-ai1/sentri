@@ -100,7 +100,18 @@ export async function persistGeneratedTests(validatedTests, project, run, defaul
   let dryRunResults = [];
   if (project?.dryRunGate && validatedTests.length > 0) {
     try {
-      dryRunResults = await dryRunBatch(validatedTests, project, { signal: defaults.signal });
+      // Forward `runId` + `testDataLocale` so the dry-run applies the SAME
+      // B6 faker-substitution + setup/teardown transforms the real runner
+      // does (`executeTest.js#applyB6PreExecutionTransforms`). Without this
+      // the gate would execute raw `__FAKE_*__` tokens and false-fail every
+      // token-using test. `run.id` seeds faker deterministically; the
+      // persisted tests don't carry an id yet (assigned in the loop below),
+      // so the dry-run faker seed uses the AI-set id or "dry-run" fallback.
+      dryRunResults = await dryRunBatch(validatedTests, project, {
+        signal: defaults.signal,
+        runId: run?.id || null,
+        testDataLocale: project.testDataLocale || "en",
+      });
     } catch (err) {
       // Defensive: a gate failure must never block persistence. The
       // operator-facing signal is the structured warn line below; the

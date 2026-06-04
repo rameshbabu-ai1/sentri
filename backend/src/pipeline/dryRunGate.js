@@ -67,6 +67,8 @@ const ERROR_MAX_CHARS = 2_000;
  * @param {AbortSignal} [opts.signal]
  * @param {object} [opts.poolOverride] — DI hook for tests.
  * @param {number} [opts.timeoutMs]
+ * @param {string} [opts.runId] — forwarded into the B6 faker seed.
+ * @param {string} [opts.testDataLocale] — faker locale for token substitution.
  * @returns {Promise<Object>} `{ status: 'passed'|'failed'|'trivial', error, durationMs }`.
  */
 export async function dryRunTest(test, project, opts = {}) {
@@ -86,6 +88,23 @@ export async function dryRunTest(test, project, opts = {}) {
   }
 
   throwIfAborted(signal);
+
+  // AUDIT-ROADMAP B6 — apply the SAME pre-execution transforms the real
+  // runner uses (`executeTest.js#applyB6PreExecutionTransforms`) so the
+  // dry-run sees exactly what `executeTest` will run: faker tokens
+  // substituted (QAL-010) + setup/teardown injected (QAL-002). Without
+  // this, a test using `__FAKE_EMAIL__` would type the literal token into
+  // a form field, fail its first assertion, and false-flag the gate —
+  // systematically blocking auto-approval for every token-using test.
+  // Lazy import keeps the gate's module graph off the cold-start path for
+  // the default (gate-disabled) project. Best-effort: a transform throw
+  // degrades to the raw code rather than failing the gate outright.
+  try {
+    const { applyB6PreExecutionTransforms } = await import("../runner/executeTest.js");
+    test = await applyB6PreExecutionTransforms(test, opts.runId || "dry-run", {
+      testDataLocale: opts.testDataLocale || "en",
+    });
+  } catch { /* best-effort — fall through with the un-transformed test */ }
 
   let lease = null;
   let networkRequests = 0;
@@ -212,8 +231,11 @@ export async function dryRunTest(test, project, opts = {}) {
  *
  * @param {Object[]} tests
  * @param {Object} project
- * @param {Object} [opts]
+ * @param {Object} [opts] — forwarded verbatim to `dryRunTest` (so `signal`,
+ *   `runId`, `testDataLocale`, `poolOverride`, `timeoutMs` all flow through).
  * @param {AbortSignal} [opts.signal]
+ * @param {string} [opts.runId] — seeds the B6 faker substitution.
+ * @param {string} [opts.testDataLocale] — faker locale for token substitution.
  * @returns {Promise<Object[]>} One `{ status, error, durationMs }` per test, aligned by index.
  */
 export async function dryRunBatch(tests, project, opts = {}) {
