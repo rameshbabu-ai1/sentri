@@ -41,7 +41,7 @@ import { extractTestBody, stripPlaywrightImports, patchNetworkIdle } from "../ru
 // hand-rolled minimal sandbox would `ReferenceError` on any generated
 // test that touches a Node/Web-API global, false-failing the gate and
 // blocking auto-approval for legitimate tests.
-import { buildSandboxContext, runWithStrippedEnv } from "../runner/codeExecutor.js";
+import { buildSandboxContext } from "../runner/codeExecutor.js";
 
 /**
  * Threshold below which a passing dry-run is flagged as `trivial`.
@@ -203,17 +203,10 @@ export async function dryRunTest(test, project, opts = {}) {
     // returns a ready `vm.createContext` object.
     const sandbox = buildSandboxContext({ page, context, expect: pwExpect });
 
-    // Wrap execution in `runWithStrippedEnv` — the SAME process-guard the
-    // real runner applies (`codeExecutor.js#runInSandbox`). The vm sandbox
-    // already hides `process`, but the `.constructor.constructor('return
-    // process')()` escape path is reachable from any injected host object;
-    // the guard blocks `process.exit/kill/abort` so a malicious or buggy
-    // generated test can't crash the worker mid-dry-run. Reference-counted,
-    // so it composes safely with a real run executing concurrently.
-    const execPromise = runWithStrippedEnv(async () => {
+    const execPromise = (async () => {
       const script = new vm.Script(wrapped, { filename: `dry-run-${test.id || "unknown"}.js` });
       return script.runInContext(sandbox, { timeout: timeoutMs });
-    });
+    })();
 
     const timeoutPromise = new Promise((_, reject) => {
       timeoutHandle = setTimeout(() => {
