@@ -35,6 +35,13 @@ import { getSelfHealingHelperCode } from "../selfHealing.js";
 // module mode), so we must extract the bare body + strip imports before
 // wrapping. Mirrors `codeExecutor.js`'s extract → strip → patch chain.
 import { extractTestBody, stripPlaywrightImports, patchNetworkIdle } from "../runner/codeParsing.js";
+// AUDIT-ROADMAP B6 — reuse the real runner's vm sandbox builder so the
+// dry-run context exposes the SAME global surface `codeExecutor.js` does
+// (`URL`, `URLSearchParams`, `TextEncoder`, `Buffer`, `parseInt`, …). A
+// hand-rolled minimal sandbox would `ReferenceError` on any generated
+// test that touches a Node/Web-API global, false-failing the gate and
+// blocking auto-approval for legitimate tests.
+import { buildSandboxContext, runWithStrippedEnv } from "../runner/codeExecutor.js";
 
 /**
  * Threshold below which a passing dry-run is flagged as `trivial`.
@@ -161,31 +168,52 @@ export async function dryRunTest(test, project, opts = {}) {
         : stripPlaywrightImports(test.playwrightCode),
     );
 
+    // Mirror the real runner's IIFE preamble (`codeExecutor.js#runGeneratedCode`):
+    // generated tests frequently reference the Playwright fixture identifiers
+    // `run` / `browser` / `request` that the LLM saw in the original
+    // `test('…', async ({ page, request }) => …)` signature. The real runner
+    // declares them inside the body so a bare reference doesn't ReferenceError;
+    // the dry-run MUST declare the same set or a fixture-referencing test
+    // false-fails the gate (the same divergence class as the missing sandbox
+    // globals). `request`/`run` resolve to `undefined` (the dry-run is a
+    // browser-context smoke — API fixtures are exercised by the real runner's
+    // dedicated API path), and `browser` resolves through the live context.
+    const fixtureStubs = "const run = undefined;\n"
+      + "const browser = context?.browser?.() ?? undefined;\n"
+      + "const request = undefined;\n";
     const helperCode = getSelfHealingHelperCode();
-    const wrapped = `(async () => {\n${helperCode}\n${preparedCode}\n})()`;
+    const wrapped = `(async () => {\n${helperCode}\n${fixtureStubs}\n${preparedCode}\n})()`;
 
-    // Minimal Playwright surface — `expect` is the only thing
-    // generated tests reach for that isn't on the `page` object.
-    // Wrapped in a try/catch so a missing optional dep on a slim
-    // build degrades to no-`expect` (the test will throw a
-    // ReferenceError on first assertion, captured as a normal
-    // dry-run failure).
+    // `expect` is the only Playwright-specific global generated tests
+    // reach for that isn't on the `page` object. Wrapped in try/catch so a
+    // missing optional dep on a slim build degrades to no-`expect` (the
+    // test throws a ReferenceError on first assertion, captured as a
+    // normal dry-run failure).
     let pwExpect;
     try { pwExpect = (await import("@playwright/test")).expect; } catch { pwExpect = undefined; }
 
-    const sandbox = {
-      page,
-      context,
-      expect: pwExpect,
-      console: { log: () => {}, warn: () => {}, error: () => {} },
-      setTimeout, clearTimeout, setInterval, clearInterval,
-    };
-    vm.createContext(sandbox);
+    // Build the sandbox via the SHARED `buildSandboxContext` from
+    // `codeExecutor.js` so the dry-run exposes the exact same global
+    // surface the real runner does (`URL`, `URLSearchParams`,
+    // `TextEncoder`, `Buffer`, `parseInt`, console, timers, …) and blocks
+    // the same dangerous globals (`process`, `require`, `fetch`, …). A
+    // divergent hand-rolled sandbox would `ReferenceError` on any test
+    // using a Node/Web-API global that the real runner provides — a
+    // systematic false-fail that blocks auto-approval. `buildSandboxContext`
+    // returns a ready `vm.createContext` object.
+    const sandbox = buildSandboxContext({ page, context, expect: pwExpect });
 
-    const execPromise = (async () => {
+    // Wrap execution in `runWithStrippedEnv` — the SAME process-guard the
+    // real runner applies (`codeExecutor.js#runInSandbox`). The vm sandbox
+    // already hides `process`, but the `.constructor.constructor('return
+    // process')()` escape path is reachable from any injected host object;
+    // the guard blocks `process.exit/kill/abort` so a malicious or buggy
+    // generated test can't crash the worker mid-dry-run. Reference-counted,
+    // so it composes safely with a real run executing concurrently.
+    const execPromise = runWithStrippedEnv(async () => {
       const script = new vm.Script(wrapped, { filename: `dry-run-${test.id || "unknown"}.js` });
       return script.runInContext(sandbox, { timeout: timeoutMs });
-    })();
+    });
 
     const timeoutPromise = new Promise((_, reject) => {
       timeoutHandle = setTimeout(() => {
