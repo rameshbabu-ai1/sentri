@@ -217,6 +217,15 @@ export async function dryRunTest(test, project, opts = {}) {
     });
 
     await Promise.race([execPromise, timeoutPromise]);
+    // Suppress the orphaned promise's rejection when the timeout wins.
+    // After `Promise.race` settles on `timeoutPromise`, the `finally`
+    // block releases the browser lease (closing the context). Any
+    // in-flight Playwright operations inside `execPromise` then throw
+    // "Target page, context or browser has been closed" — rejecting
+    // the now-unobserved promise. Without this `.catch`, Node.js emits
+    // an `unhandledRejection` warning (or crashes on future Node
+    // versions where the default flips to `throw`).
+    execPromise.catch(() => {});
 
     const durationMs = Date.now() - startedAt;
     if (durationMs < DRY_RUN_TRIVIAL_THRESHOLD_MS && networkRequests === 0) {
