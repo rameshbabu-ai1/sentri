@@ -29,6 +29,7 @@ import { dryRunBatch } from "./dryRunGate.js";
 import { generateText, parseJSON } from "../aiProvider.js";
 import { buildSemanticReviewPrompt, normalizeSemanticReviewResponse } from "./prompts/semanticReviewPrompt.js";
 import { throwIfAborted } from "../utils/abortHelper.js";
+import { formatLogLine } from "../utils/logFormatter.js";
 
 /**
  * Pseudo-user attributed to machine-made approvals in `tests.approvedBy` and
@@ -118,7 +119,7 @@ export async function persistGeneratedTests(validatedTests, project, run, defaul
       // tests still ship to the review queue with `dryRunStatus = null`
       // so the gate visibly degrades rather than silently dropping
       // results.
-      console.warn(`[testPersistence] dry-run gate failed: ${err?.message || err}`);
+      console.warn(formatLogLine("warn", run?.id || null, `[testPersistence] dry-run gate failed: ${err?.message || err}`));
       dryRunResults = [];
     }
   }
@@ -353,7 +354,7 @@ export async function applySemanticReview(testIds, project, run, opts = {}) {
       // the warn line; the row's `semanticReviewScore` stays NULL,
       // identical to "the gate was disabled" — defensible degrade.
       // eslint-disable-next-line no-console
-      console.warn(`[testPersistence] semantic review failed for ${id}: ${err?.message || err}`);
+      console.warn(formatLogLine("warn", run?.id || null, `[testPersistence] semantic review failed for ${id}: ${err?.message || err}`));
     }
   }
   return { reviewed, rejected, skipped: null };
