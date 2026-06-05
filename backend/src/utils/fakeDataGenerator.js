@@ -147,7 +147,7 @@ export async function createFaker({ runId, testId, locale = "en", skipTokens } =
       const { Faker, allLocales, faker: defaultFaker } = mod;
       if (typeof Faker === "function" && allLocales) {
         const localePack = allLocales[safeLocale] || allLocales.en;
-        fakerInstance = new Faker({ locale: localePack });
+        fakerInstance = new Faker({ locale: [localePack, allLocales.en] });
       } else if (defaultFaker) {
         fakerInstance = defaultFaker;
       }
