@@ -531,7 +531,7 @@ export async function applyB6PreExecutionTransforms(test, runId, opts = {}) {
     try {
       const faker = await createFaker({
         runId,
-        testId: test.id || "unknown",
+        testId: opts.testId || test.id || "unknown",
         locale: opts.testDataLocale || "en",
       });
       next.playwrightCode = faker.substitute(next.playwrightCode);

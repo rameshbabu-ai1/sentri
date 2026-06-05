@@ -76,6 +76,9 @@ const ERROR_MAX_CHARS = 2_000;
  * @param {number} [opts.timeoutMs]
  * @param {string} [opts.runId] — forwarded into the B6 faker seed.
  * @param {string} [opts.testDataLocale] — faker locale for token substitution.
+ * @param {number} [opts.batchIndex] — 0-based position in the batch; used
+ *   as a faker-seed differentiator because validated tests don't carry a
+ *   DB-assigned `id` yet at dry-run time (assigned later in the persist loop).
  * @returns {Promise<Object>} `{ status: 'passed'|'failed'|'trivial', error, durationMs }`.
  */
 export async function dryRunTest(test, project, opts = {}) {
@@ -108,8 +111,15 @@ export async function dryRunTest(test, project, opts = {}) {
   // degrades to the raw code rather than failing the gate outright.
   try {
     const { applyB6PreExecutionTransforms } = await import("../runner/executeTest.js");
+    // Use batchIndex as a seed differentiator — validated tests don't
+    // carry a DB-assigned `id` yet (that happens in the persist loop
+    // after the dry-run gate returns). Without this, every test in the
+    // batch seeds with `"unknown"` and gets identical faker values,
+    // causing UNIQUE-constraint false failures on the second signup.
+    const seedTestId = test.id || `dry-run-${opts.batchIndex ?? 0}`;
     test = await applyB6PreExecutionTransforms(test, opts.runId || "dry-run", {
       testDataLocale: opts.testDataLocale || "en",
+      testId: seedTestId,
     });
   } catch { /* best-effort — fall through with the un-transformed test */ }
 
@@ -271,7 +281,7 @@ export async function dryRunTest(test, project, opts = {}) {
 export async function dryRunBatch(tests, project, opts = {}) {
   if (!Array.isArray(tests) || tests.length === 0) return [];
   const results = [];
-  for (const t of tests) {
+  for (let i = 0; i < tests.length; i++) {
     if (opts.signal?.aborted) {
       // Trailing tests after abort report `failed: aborted` so the
       // Review Queue chip is honest. The original `aborted` shape
@@ -283,7 +293,7 @@ export async function dryRunBatch(tests, project, opts = {}) {
     // The pool-bounded sequential loop preserves the persistence
     // ordering downstream.
     // eslint-disable-next-line no-await-in-loop
-    const r = await dryRunTest(t, project, opts);
+    const r = await dryRunTest(tests[i], project, { ...opts, batchIndex: i });
     results.push(r);
   }
   return results;
