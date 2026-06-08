@@ -534,9 +534,27 @@ export async function applyB6PreExecutionTransforms(test, runId, opts = {}) {
         testId: opts.testId || test.id || "unknown",
         locale: opts.testDataLocale || "en",
       });
-      next.playwrightCode = faker.substitute(next.playwrightCode);
-      if (hasSetup)    next.setupCode    = faker.substitute(next.setupCode);
-      if (hasTeardown) next.teardownCode = faker.substitute(next.teardownCode);
+      // Substitute ALL three code blocks in a single `substitute()` call
+      // by concatenating with a unique separator, then splitting back.
+      // This ensures the SAME token (e.g. `__FAKE_EMAIL__`) resolves to
+      // the SAME value across setupCode, playwrightCode, and teardownCode
+      // — the faker PRNG advances once per token type per call, so
+      // calling `substitute()` three times independently would produce
+      // different values for the same token across blocks (the PRNG
+      // state advances between calls). Industry expectation: "fill email
+      // with __FAKE_EMAIL__" in setup and "expect text __FAKE_EMAIL__"
+      // in the main body must resolve to the same address.
+      const SEP = "\n/* __B6_CODE_BOUNDARY__ */\n";
+      const combined = [
+        next.playwrightCode,
+        hasSetup ? next.setupCode : "",
+        hasTeardown ? next.teardownCode : "",
+      ].join(SEP);
+      const substituted = faker.substitute(combined);
+      const parts = substituted.split(SEP);
+      next.playwrightCode = parts[0];
+      if (hasSetup)    next.setupCode    = parts[1];
+      if (hasTeardown) next.teardownCode = parts[2];
     } catch (err) {
       // Best-effort: a faker substitution failure must never block the
       // test. Operators get the warn line; the test runs with raw
