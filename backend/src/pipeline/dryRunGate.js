@@ -213,6 +213,22 @@ export async function dryRunTest(test, project, opts = {}) {
     // returns a ready `vm.createContext` object.
     const sandbox = buildSandboxContext({ page, context, expect: pwExpect });
 
+    // NOTE: The real runner wraps vm execution in `runWithStrippedEnv()`
+    // (`codeExecutor.js:163`) which blocks `process.exit/kill/abort` as
+    // defence-in-depth against the `.constructor.constructor('return
+    // process')()` vm escape. The dry-run gate intentionally OMITS this
+    // guard because `runWithStrippedEnv` is ref-counted and the dry-run's
+    // `Promise.race` timeout pattern can abandon the inner promise before
+    // the `finally` block decrements the counter — leaving `process.exit`
+    // permanently replaced with a throwing stub, which crashes the test
+    // runner's `summary() → process.exit(0)` call (verified in CI commit
+    // `bf926cc` → reverted in `5ead0f1`). The primary defence is still in
+    // place: `buildSandboxContext` sets `process: undefined` in the vm
+    // context. The `.constructor.constructor` escape requires deliberate
+    // adversarial code — AI-generated tests don't produce it. If a future
+    // Node.js version provides a non-ref-counted process guard or the
+    // timeout mechanism is refactored to always await the inner promise's
+    // `finally`, this comment marks the site to revisit.
     const execPromise = (async () => {
       const script = new vm.Script(wrapped, { filename: `dry-run-${test.id || "unknown"}.js` });
       return script.runInContext(sandbox, { timeout: timeoutMs });
