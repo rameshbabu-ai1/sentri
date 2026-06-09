@@ -123,24 +123,27 @@ export async function dryRunTest(test, project, opts = {}) {
     });
   } catch { /* best-effort — fall through with the un-transformed test */ }
 
-  // Block process.exit/kill/abort for the duration of this dry-run so
-  // sandbox-escaped code (via `.constructor.constructor('return process')()`)
-  // cannot crash the server. Unlike `runWithStrippedEnv` (which is ref-counted
-  // and races with `Promise.race` timeout — see commit bf926cc → 5ead0f1),
-  // this guard is scoped to the outer try/finally which ALWAYS runs regardless
-  // of whether the timeout or the exec promise wins the race.
-  const _savedExit = process.exit;
-  const _savedKill = process.kill;
-  const _savedAbort = process.abort;
-  process.exit = () => { throw new Error("process.exit() is blocked during dry-run"); };
-  process.kill = () => { throw new Error("process.kill() is blocked during dry-run"); };
-  process.abort = () => { throw new Error("process.abort() is blocked during dry-run"); };
-
+  let _savedExit = null;
+  let _savedKill = null;
+  let _savedAbort = null;
   let lease = null;
   let networkRequests = 0;
   let timeoutHandle = null;
   let timedOut = false;
   try {
+    // Block process.exit/kill/abort for the duration of this dry-run so
+    // sandbox-escaped code (via `.constructor.constructor('return process')()`)
+    // cannot crash the server. Unlike `runWithStrippedEnv` (which is ref-counted
+    // and races with `Promise.race` timeout — see commit bf926cc → 5ead0f1),
+    // this guard is scoped to the outer try/finally which ALWAYS runs regardless
+    // of whether the timeout or the exec promise wins the race.
+    _savedExit = process.exit;
+    _savedKill = process.kill;
+    _savedAbort = process.abort;
+    process.exit = () => { throw new Error("process.exit() is blocked during dry-run"); };
+    process.kill = () => { throw new Error("process.kill() is blocked during dry-run"); };
+    process.abort = () => { throw new Error("process.abort() is blocked during dry-run"); };
+
     lease = await pool.acquire({});
     const { context, page } = lease;
 
@@ -271,9 +274,9 @@ export async function dryRunTest(test, project, opts = {}) {
   } finally {
     // Restore process methods FIRST — before any async cleanup that might
     // trigger process.exit indirectly (e.g. an unhandled rejection handler).
-    process.exit = _savedExit;
-    process.kill = _savedKill;
-    process.abort = _savedAbort;
+    if (_savedExit) process.exit = _savedExit;
+    if (_savedKill) process.kill = _savedKill;
+    if (_savedAbort) process.abort = _savedAbort;
     if (timeoutHandle) clearTimeout(timeoutHandle);
     if (lease) {
       try { await lease.release(); } catch { /* best-effort */ }
