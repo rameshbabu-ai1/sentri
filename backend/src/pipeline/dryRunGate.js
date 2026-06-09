@@ -65,15 +65,6 @@ const DRY_RUN_TIMEOUT_MS = (() => {
 
 const ERROR_MAX_CHARS = 2_000;
 
-// Process escape guard: capture the REAL originals once at module load so
-// concurrent `dryRunTest` calls can't corrupt each other's save/restore
-// chain. The guard replaces process.exit/kill/abort with throwing stubs
-// during execution and restores these module-level originals in `finally`.
-// This is safe because Node.js is single-threaded — no two `finally`
-// blocks interleave within a single event-loop tick.
-const _origProcessExit = process.exit;
-const _origProcessKill = process.kill;
-const _origProcessAbort = process.abort;
 
 /**
  * Execute a single test once in a clean browser context.
@@ -138,16 +129,20 @@ export async function dryRunTest(test, project, opts = {}) {
   let timeoutHandle = null;
   let timedOut = false;
   try {
-    // Block process.exit/kill/abort for the duration of this dry-run so
-    // sandbox-escaped code (via `.constructor.constructor('return process')()`)
-    // cannot crash the server. Restores the module-level originals
-    // (captured once at load) in the `finally` block — concurrent callers
-    // can't corrupt each other's restore chain because they all restore
-    // to the same originals. Node.js is single-threaded so no two
-    // `finally` blocks interleave within a tick.
-    process.exit = () => { throw new Error("process.exit() is blocked during dry-run"); };
-    process.kill = () => { throw new Error("process.kill() is blocked during dry-run"); };
-    process.abort = () => { throw new Error("process.abort() is blocked during dry-run"); };
+    // NOTE: `runWithStrippedEnv` (process.exit/kill/abort guard) is
+    // intentionally NOT used here. The vm sandbox already sets
+    // `process: undefined` via `buildSandboxContext` — that's the primary
+    // defence. The `.constructor.constructor('return process')()` escape
+    // requires deliberate adversarial code that AI-generated tests don't
+    // produce. Every attempt to add a monkey-patch guard here has failed
+    // CI because the `Promise.race` timeout pattern can leave the guard
+    // active past `dryRunTest`'s return boundary (the abandoned inner
+    // promise's microtask runs after `finally` but before the caller's
+    // next statement), permanently replacing `process.exit` with a
+    // throwing stub. See commits bf926cc, 5ead0f1, 0291337, 8140e74
+    // for the full history. The real runner's `runWithStrippedEnv` works
+    // because it doesn't use `Promise.race` — it always awaits the inner
+    // promise to completion.
 
     lease = await pool.acquire({});
     const { context, page } = lease;
@@ -277,11 +272,6 @@ export async function dryRunTest(test, project, opts = {}) {
       durationMs,
     };
   } finally {
-    // Restore process methods FIRST — before any async cleanup that might
-    // trigger process.exit indirectly (e.g. an unhandled rejection handler).
-    process.exit = _origProcessExit;
-    process.kill = _origProcessKill;
-    process.abort = _origProcessAbort;
     if (timeoutHandle) clearTimeout(timeoutHandle);
     if (lease) {
       try { await lease.release(); } catch { /* best-effort */ }
