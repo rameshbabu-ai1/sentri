@@ -65,6 +65,16 @@ const DRY_RUN_TIMEOUT_MS = (() => {
 
 const ERROR_MAX_CHARS = 2_000;
 
+// Process escape guard: capture the REAL originals once at module load so
+// concurrent `dryRunTest` calls can't corrupt each other's save/restore
+// chain. The guard replaces process.exit/kill/abort with throwing stubs
+// during execution and restores these module-level originals in `finally`.
+// This is safe because Node.js is single-threaded — no two `finally`
+// blocks interleave within a single event-loop tick.
+const _origProcessExit = process.exit;
+const _origProcessKill = process.kill;
+const _origProcessAbort = process.abort;
+
 /**
  * Execute a single test once in a clean browser context.
  *
@@ -123,9 +133,6 @@ export async function dryRunTest(test, project, opts = {}) {
     });
   } catch { /* best-effort — fall through with the un-transformed test */ }
 
-  let _savedExit = null;
-  let _savedKill = null;
-  let _savedAbort = null;
   let lease = null;
   let networkRequests = 0;
   let timeoutHandle = null;
@@ -133,13 +140,11 @@ export async function dryRunTest(test, project, opts = {}) {
   try {
     // Block process.exit/kill/abort for the duration of this dry-run so
     // sandbox-escaped code (via `.constructor.constructor('return process')()`)
-    // cannot crash the server. Unlike `runWithStrippedEnv` (which is ref-counted
-    // and races with `Promise.race` timeout — see commit bf926cc → 5ead0f1),
-    // this guard is scoped to the outer try/finally which ALWAYS runs regardless
-    // of whether the timeout or the exec promise wins the race.
-    _savedExit = process.exit;
-    _savedKill = process.kill;
-    _savedAbort = process.abort;
+    // cannot crash the server. Restores the module-level originals
+    // (captured once at load) in the `finally` block — concurrent callers
+    // can't corrupt each other's restore chain because they all restore
+    // to the same originals. Node.js is single-threaded so no two
+    // `finally` blocks interleave within a tick.
     process.exit = () => { throw new Error("process.exit() is blocked during dry-run"); };
     process.kill = () => { throw new Error("process.kill() is blocked during dry-run"); };
     process.abort = () => { throw new Error("process.abort() is blocked during dry-run"); };
@@ -274,9 +279,9 @@ export async function dryRunTest(test, project, opts = {}) {
   } finally {
     // Restore process methods FIRST — before any async cleanup that might
     // trigger process.exit indirectly (e.g. an unhandled rejection handler).
-    if (_savedExit) process.exit = _savedExit;
-    if (_savedKill) process.kill = _savedKill;
-    if (_savedAbort) process.abort = _savedAbort;
+    process.exit = _origProcessExit;
+    process.kill = _origProcessKill;
+    process.abort = _origProcessAbort;
     if (timeoutHandle) clearTimeout(timeoutHandle);
     if (lease) {
       try { await lease.release(); } catch { /* best-effort */ }

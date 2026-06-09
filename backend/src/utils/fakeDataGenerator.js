@@ -92,7 +92,7 @@ function deterministicFallback(token, seed) {
     case "__FAKE_UUID__":       return `${slug}-${slug.slice(0,4)}-4${slug.slice(1,4)}-8${slug.slice(2,5)}-${slug}${slug.slice(0,4)}`;
     case "__FAKE_ZIP__":        return slug.replace(/[a-f]/g, "0").slice(0, 5);
     case "__FAKE_NUMBER__":     return String(parseInt(slug, 16) % 100000);
-    case "__TIMESTAMP__":       return String(Date.now());
+    case "__TIMESTAMP__":       return String(Math.floor(parseInt(slug, 16) / 1000) + 1700000000000);
     case "__FAKE_PASSWORD__":   return `Pw!${slug}9aZ`;
     default:                    return `fake-${slug}`;
   }
@@ -116,7 +116,7 @@ function resolveToken(token, fakerInstance, seed) {
       case "__FAKE_UUID__":       return fakerInstance.string.uuid();
       case "__FAKE_NUMBER__":     return String(fakerInstance.number.int({ min: 0, max: 99999 }));
       case "__FAKE_WORD__":       return fakerInstance.lorem.word();
-      case "__TIMESTAMP__":       return String(Date.now());
+      case "__TIMESTAMP__":       return String(fakerInstance.number.int({ min: 1700000000000, max: 1800000000000 }));
       default:                    return deterministicFallback(token, seed);
     }
   } catch {
