@@ -956,7 +956,7 @@ correct screenshot when `evt._fromIframe` is set; baseline crops need to
 be keyed by `${parentSnapshotFp}::${iframeSrc}::${evt.key}` so a frame
 moving between pages doesn't share baselines with an unrelated parent.)
 
-**Status:** 🔲 Planned | **Effort:** L | **Source:** Audit §F.2 · §B.2 ·
+**Status:** 🔲 In Progress | **Effort:** L | **Source:** Audit §F.2 · §B.2 ·
 §J Scenario 4
 
 **Problem:**
